@@ -5,6 +5,7 @@
             :url "https://www.eclipse.org/legal/epl-2.0/"}
   :dependencies [[org.clojure/clojure "1.10.0"]
                  [incanter "1.9.3"]
-                 [trystan/voronoi-diagram "1.0.0"]
                  ]
-  :repl-options {:init-ns covid.core})
+  :repl-options {:init-ns covid.core}
+  :jvm-opts ["-Xmx14g" "-server"])
+
