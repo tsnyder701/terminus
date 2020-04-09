@@ -2,12 +2,15 @@
   (:require [incanter.core :as i]
             [incanter.charts :as ic]
             [incanter.distributions :as id]
+            [incanter.stats :as is]
             [clojure.set :as set])
   (:import [java.awt Color]))
 
 (def isolation-severity 0.3)
-(def death-rate 0.02)
-(def hospitalization-rate 0.35)
+(def death-rate 0.03)
+(def hospitalization-rate 0.25)
+
+(def halt-flag (atom false))
 
 (defn kvmap [kf vf m]
   (into {} (for [[k v] m]
@@ -46,11 +49,12 @@
                      :other {:male 1/2, :female 1/2}})
 
 (defn draw [m]
-  (reduce #(if (< %1 (second %2))
-             (reduced (first %2))
-             (- %1 (second %2)))
-          (rand)
-          m))
+  (or (reduce #(if (< %1 (second %2))
+                 (reduced (first %2))
+                 (- %1 (second %2)))
+              (rand)
+              m)
+      (first (last m))))
 
 (defn make-actors [n cluster-types]
   (loop [i 0
@@ -268,15 +272,19 @@
 (defn run-simulation [[actors clusters] n cluster-type-transmission-by-cases]
   (let [i (repeatedly n #(rand-int (count actors)))]
     (loop [actors (reduce #(update %1 %2 assoc :contract-day 0, :illness-day 5, :recovery-day 20, :source -1) actors i)
-           contracted {10 (vec i)}
+           contagious {10 (vec i)}
            day 1
            max-day 20
            day-counts {0 {:contractions n}, 5 {:illnesses n}, 20 {:recoveries n}}
            total-counts {0 {:contractions n}}
            cttd cluster-type-transmission-by-cases
            policy-change-days []]
-      (let [infections (apply merge (for [[cd is] contracted
-                                          i is
+      (let [ctt (into {} (for [[k v] (last (first cttd))]
+                           [k (if (zero? v)
+                                [[0 1]]
+                                (for [i (range 11)]
+                                  [i (is/pdf-binomial i :size 10 :prob v)]))]))
+            infections (apply merge (for [i (mapcat contagious (range day (+ 7 day)))
                                           :let [a (actors i)]
                                           ;; You can only transmit if you're contagious,
                                           ;; which happens 2 days before illness to 5 days after.
@@ -292,34 +300,35 @@
                                                     (= :household (:type cluster))
                                                     (< isolation-severity (:severity a)))
                                           :let [cluster-actors (vec (:actors cluster))]
-                                          j (into #{} (repeatedly 10 #(rand-int (count cluster-actors))))
-                                          :when (< (rand) ((last (first cttd)) (:type cluster)))
+                                          j (repeatedly (draw (ctt (:type cluster))) #(rand-int (count cluster-actors)))
+                                          ;j (into #{} (repeatedly 10 #(rand-int (count cluster-actors))))
+                                          ;:when (< (rand) ((last (first cttd)) (:type cluster)))
                                           :let [actor-id (cluster-actors j)]
                                           ;; Finally, the other actor you're transmitting to must not have
                                           ;; already contracted it, and they must be randomly unlucky enough
                                           ;; to be exposed based upon the transmission rate for the location.
                                           :when (and (< day (get-in actors [actor-id :contract-day] 1e6)))]
                                       (let [severity (:severity a)  ;; based upon age
-                                            onset (int (+ 2 (* 13 (id/draw (id/beta-distribution 3 10)))))  ;; [2, 14] days of incubation, mean of 5
+                                            onset (int (+ 5 (* 13 (id/draw (id/beta-distribution 3 10)))))  ;; [2, 14] days of incubation, mean of 5
                                             ;; [7, 34] days of illness for most severe cases
                                             ;; [3, 15] days for the least severe still having symptoms
-                                            recovery (+ onset (int (* (max 3/7 severity) (+ 7.5 (* 28 (id/draw (id/beta-distribution 4 4)))))))
-                                            hospitalization (+ onset 2 (int (* 8 (id/draw (id/beta-distribution 5 7)))))
-                                            death (+ hospitalization (int (+ 1.5 (* 24 (id/draw (id/beta-distribution 3 9))))))
-                                            discharge (+ hospitalization (int (+ 1.5 (* 42 (id/draw (id/beta-distribution 9 15))))))
+                                            recovery (if (< severity (- 1 hospitalization-rate)) (+ onset (int (* (max 3/7 severity) (+ 7.5 (* 28 (id/draw (id/beta-distribution 4 4))))))))
+                                            hospitalization (if (nil? recovery) (+ onset 2 (int (* 13 (id/draw (id/beta-distribution 5 7))))))
+                                            death (if (> severity (- 1 death-rate)) (+ hospitalization (int (+ 1.5 (* 22 (id/draw (id/beta-distribution 3 9)))))))
+                                            discharge (if (and hospitalization (nil? death)) (+ hospitalization (int (+ 1.5 (* 42 (id/draw (id/beta-distribution 9 15)))))))
                                             terms (apply conj {}
                                                          [:contract-day day]
                                                          [:source (:id a)]
                                                          [:source-cluster (:id cluster)]
                                                          [:illness-day (+ day onset)]
                                                          (cond
-                                                           (< (- 1 death-rate) severity) [[:hospitalization-day (+ day hospitalization)] [:death-day (+ day death)]]
-                                                           (< (- 1 hospitalization-rate) severity) [[:hospitalization-day (+ day hospitalization)] [:recovery-day (+ day discharge)] [:discharge-day (+ day discharge)]]
+                                                           death [[:hospitalization-day (+ day hospitalization)] [:death-day (+ day death)]]
+                                                           discharge [[:hospitalization-day (+ day hospitalization)] [:recovery-day (+ day discharge)] [:discharge-day (+ day discharge)]]
                                                            :default [[:recovery-day (+ day recovery)]]))]
                                         ;(println "day" day ":" (:id a) "->" member-id "at" (dissoc cluster :members))
                                         {actor-id terms})))
             actors (reduce #(update %1 (first %2) into (second %2)) actors infections)
-            contracted (apply merge-with into contracted
+            contagious (apply merge-with into contagious
                               (for [i (map first infections)
                                     :let [a (actors i)
                                           illness-day (:illness-day a)]]
@@ -330,16 +339,17 @@
             day-counts (reduce #(if-let [k2 (actor->day (first %2))]
                                   (update-in %1 [(second %2) k2] safe-inc)
                                   %1) day-counts (mapcat val infections))
-            total-counts (assoc total-counts day (merge-with + {:day 1} (total-counts (dec day)) (day-counts day)))
-            policy-change (> (get-in total-counts [day (first (first cttd))] 0) (second (first cttd)))]
-        #_(println day ":" (count infections) "new cases," (total-counts day) "totals")
-        (if (or (> day max-day)
-                (and policy-change (nil? (next cttd))))
+            total-counts (assoc total-counts day (merge-with + {:day 1, (keyword (str "policy-" (count policy-change-days) "-day")) 1} (total-counts (dec day)) (day-counts day)))
+            policy-change ((first (first cttd)) day day-counts total-counts)]
+        ;(println day ":" (count infections) "new cases," (total-counts day) "totals")
+        (if (or (> day max-day) (and policy-change (nil? (next cttd))))
           [actors
            day-counts
            total-counts
            policy-change-days]
-          (recur actors (dissoc contracted day) (inc day) max-day day-counts total-counts (if policy-change (do #_(println "After" (get-in total-counts [day (first (first cttd))]) "vs." (second (first cttd)) "Switching to" (second cttd)) (next cttd)) cttd) (if policy-change (conj policy-change-days day) policy-change-days)))))))
+          (if @halt-flag
+            nil
+            (recur actors (dissoc contagious day) (inc day) max-day day-counts total-counts (if policy-change (do (println "Switching to" (second cttd)) (next cttd)) cttd) (if policy-change (conj policy-change-days day) policy-change-days))))))))
 
 (def cobb-cluster-types [{:type :worship, :level :household, :multiplicity {0 2/3, 1 1/3},
                           :locality (id/beta-distribution 1 10),
@@ -463,18 +473,20 @@
                           :subtype (into {} (for [name (range 30)]
                                               [{:name (keyword (str "store" name)), :count (id/draw [1 1 1 1 1 2])} 1/30]))}])
 
-(def lvl0 {:worship 0.01, :grocers 0.005, :work 0.03, :household 0.06, :store 0.0015, :school 0.05})
-(def lvl1 {:worship 0.004, :grocers 0.005, :work 0.01, :household 0.07, :store 0.001, :school 0})
+(def lvl0 {:worship 0.005, :grocers 0.005, :work 0.03, :household 0.06, :store 0.0015, :school 0.05})
+(def lvl1 {:worship 0.005, :grocers 0.005, :work 0.02, :household 0.07, :store 0.001, :school 0})
+(defn lvl0_5 [x]
+  {:worship (* 0.005 x) :grocers (* 0.005 x) :work (* 0.02 x) :household 0.07 :store (* 0.001 x) :school 0})
 (def lvl2 {:worship 0.002, :grocers 0.0025, :work 0.005, :household 0.07, :store 0.0003, :school 0})
-(def lvl3 {:worship 0.001, :grocers 0.0025, :work 0.004, :household 0.07, :store 0.0001, :school 0})
+(def lvl3 {:worship 0.00125, :grocers 0.00125, :work 0.005, :household 0.08, :store 0.000025, :school 0})
 (defn fuzz [m mean sd]
   (kvmap identity #(* % (Math/exp (id/draw (id/normal-distribution mean sd)))) m))
 
-(defn plot-sim [[actors data]]
+(defn plot-sim [[actors data _ policy-change-days]]
   (let [p (ic/xy-plot)
         max-days (inc (apply max (keys data)))
         sorted-data (sort data)
-        totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths]]
+        totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
                           [lbl (vec (reductions + 0 (map #(get-in data [% lbl] 0) (range max-days))))]))
         contagious (drop 2
                      (reductions +
@@ -487,7 +499,7 @@
                                          (get-in data [% :deaths] 0)) (range max-days))))]
     (ic/set-stroke p :width 3)
     ;; Add the cumulative lines
-    (doseq [lbl [:contractions :illnesses :recoveries :deaths]]
+    (doseq [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
       (ic/add-lines p (range max-days) (lbl totals)))
     ;; Add the healthy line
     ;(ic/add-lines p (range max-days) (map #(apply - (count actors) 0 (map (fn [a] (get-in data [a :contractions] 0)) (range %1))) (range max-days)))
@@ -496,9 +508,14 @@
     (ic/add-lines p (range max-days) contagious)
     ;; Add the hospital load
     (ic/add-lines p (range max-days) hospitalizations)
-    (doseq [[ds c] (map vector (range 1 8) [Color/orange Color/red Color/green Color/black Color/pink Color/magenta Color/blue])]
+    (doseq [[ds c] (map vector (range 1 9) [Color/orange Color/red Color/green Color/black Color/cyan Color/pink Color/magenta Color/blue])]
       (ic/set-stroke-color p c :dataset ds)
       (ic/set-stroke p :width 3 :dataset ds))
+    (doseq [[ds pc c] (map vector (range 9 1000) policy-change-days (cycle [Color/cyan Color/yellow Color/white]))]
+      (ic/add-lines p [(inc pc) (inc pc)] [0 (* 1.2 (get-in totals [:illnesses max-days] 0))])
+      ;(ic/set-stroke-color p c :dataset ds)
+      ;(ic/set-stroke p :width 1 :dataset ds)
+      )
     (i/view p)
     p))
 
@@ -512,7 +529,7 @@
             max-days (inc (apply max (keys data)))
             days (range (- offset) (- max-days offset))
             sorted-data (sort data)
-            totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths]]
+            totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
                               [lbl (vec (reductions + 0 (map #(get-in data [% lbl] 0) (range max-days))))]))
             contagious (drop 2
                              (reductions +
@@ -526,18 +543,20 @@
         ;; Add the cumulative lines
         (doseq [[lbl i c] [[:contractions 1 Color/orange] [:illnesses 2 Color/red]
                            [:recoveries 3 Color/green] [:deaths 4 Color/black]]]
-          ;(ic/add-lines p days (lbl totals))
-          ;(ic/set-stroke-color p c :dataset (+ i (* j 7)))
+          (ic/add-lines p days (lbl totals))
+          (ic/set-stroke-color p c :dataset (+ i (* j 8)))
           )
         ;; Add the healthy line
-        ;(ic/add-lines p days (map #(apply - (count actors) 0 (map (fn [a] (get-in data [a :contractions] 0)) (range %1))) (range max-days)))
-        ;(ic/set-stroke-color p Color/white :dataset (+ 5 (* j 7)))
+        (ic/add-lines p days (map #(apply - (count actors) 0 (map (fn [a] (get-in data [a :contractions] 0)) (range %1))) (range max-days)))
+        (ic/set-stroke-color p Color/white :dataset (+ 5 (* j 8)))
         ;; Add the transmissive cases
-        ;(ic/add-lines p days contagious)
-        ;(ic/set-stroke-color p Color/magenta :dataset (+ 6 (* j 7)))
+        (ic/add-lines p days contagious)
+        (ic/set-stroke-color p Color/magenta :dataset (+ 6 (* j 8)))
         ;; Add the hospital load
+        (ic/add-lines p days (:hospitalizations totals))
+        (ic/set-stroke-color p Color/cyan :dataset (+ 7 (* j 8)))
         (ic/add-lines p days hospitalizations)
-        (ic/set-stroke-color p Color/blue :dataset (+ 1 (* j 1)))
+        (ic/set-stroke-color p Color/blue :dataset (+ 8 (* j 8)))
         ))
     (i/view p)
     p))
@@ -579,19 +598,49 @@
                            day))]
     (calc-r [actors] (range (inc tenth-day)))))
 
-(defn summarize [[actors data _ policy-change-days]]
+(defn calc-doubling [[_ _ totals] days & [kw]]
+  (let [days (if (number? days) #{days} (into #{} days))
+        kw (or kw :contractions)
+        min-day (apply min days)
+        max-day (apply max days)
+        min-val (get-in totals [min-day kw] 0)
+        max-val (get-in totals [max-day kw] 0)]
+    (println min-day max-day min-val max-val (float (/ max-val min-val)))
+    (/ (- max-day min-day)
+       (/ (Math/log10 (/ max-val min-val))
+          (Math/log10 2)))))
+
+(defn summarize [[actors data totals policy-change-days]]
   (let [eradication-days (apply max (keys data))
-        total-infected (reduce + (map #(get % :contractions 0) (vals data)))
+        total-infected (get-in totals [eradication-days :contractions] 0) #_(reduce + (map #(get % :contractions 0) (vals data)))
         sorted-data (sort data)
         peak-illnesses (reduce #(if (>= (second %1) (second %2)) %1 %2)
-                               (map vector (map first sorted-data) (reductions 
+                               (->> eradication-days
+                                    inc
+                                    range
+                                    (map totals)
+                                    (map #(- (get % :illnesses 0) (get % :recoveries 0) (get % :deaths 0)))
+                                    (map-indexed vector))
+                               #_(map vector (map first sorted-data) (reductions 
                                                         #(+ %1 (- (get %2 :illnesses 0) (get %2 :recoveries 0)))
                                                         0 (map second sorted-data))))
         peak-recoveries (reduce #(if (>= (second %1) (second %2)) %1 %2)
-                                (map vector (keys data) (map #(- (get % :recoveries 0) (get % :illnesses 0)) (vals data))))
-        total-deaths (reduce + (map #(get % :deaths 0) (vals data)))
+                               (->> eradication-days
+                                    inc
+                                    range
+                                    (map data)
+                                    (map #(get % :recoveries 0))
+                                    (map-indexed vector))
+                               #_(map vector (keys data) (map #(- (get % :recoveries 0) (get % :illnesses 0)) (vals data))))
+        total-deaths (-> eradication-days totals :deaths) #_(reduce + (map #(get % :deaths 0) (vals data)))
         peak-hospitalizations (reduce #(if (>= (second %1) (second %2)) %1 %2)
-                                      (map vector (map first sorted-data)
+                               (->> eradication-days
+                                    inc
+                                    range
+                                    (map totals)
+                                    (map #(- (get % :hospitalizations 0) (get % :discharges 0) (get % :deaths 0)))
+                                    (map-indexed vector))
+                               #_(map vector (map first sorted-data)
                                            (reductions
                                             #(+ %1 (- (get %2 :hospitalizations 0) (+ (get %2 :discharges 0)
                                                                                       (get %2 :deaths 0))))
@@ -604,3 +653,5 @@
      :policy-changes policy-change-days
      :total-deaths total-deaths
      :peak-hospitalizations peak-hospitalizations}))
+
+(def ga-hospitalizations [394 473 566 617 666 707 833 952 1056 1158 1239 1283 1332 1774 1993])
