@@ -6,33 +6,62 @@
             [clojure.set :as set])
   (:import [java.awt Color]))
 
+;; The severity of illness, above which, an actor doesn't go outside their household after :illness-day
 (def isolation-severity 0.3)
-(def death-rate 0.03)
-(def hospitalization-rate 0.25)
+;; The severity, above which, an actor will eventually die if they contract COVID
+;; To convert to a percentile, you must first weight by age demographics
+(def death-severity 0.97)
+;; The severity, above which, an actor will eventually go to the hospital if they contract COVID
+;; To convert to a percentile, you must first weight by age demographics
+(def hospitalization-severity 0.75)
 
 (def halt-flag (atom false))
 
+;; kvmap transforms a map by applying kf to each key and vf to each value
+;; kf should be one-to-one or the output is undefined
 (defn kvmap [kf vf m]
   (into {} (for [[k v] m]
              [(kf k) (vf v)])))
 
+;; normalize takes a map of keys to relative proprotions and returns a map
+;; of keys to probabilities, suitable for use with draw
 (defn normalize [m]
   (let [s (reduce + (vals m))]
     (kvmap identity #(/ %1 s) m)))
 
+;; The relative numbers of people in each decade of life in the US, according to 2010 Census
 (def age-demo (normalize {0 40, 1 42, 2 43, 3 41, 4 41, 5 42, 6 36, 7 20, 8 8, 9 1}))
+;; Beta distribution parameters to use for drawing the severity of disease for each age cohort
+;; The values were chosen such that the distribution mean matched death rates for each age cohort according
+;; to a paper I found
+;; TODO(tsnyder): Find the paper and link it here
 (def age-severity {0 [10/19 19/10], 1 [50/73 73/50], 2 [5/8 8/5], 3 [3/4 4/3], 4 [25/32 32/25], 5 [15/16 16/15], 6 [9/8 8/9], 7 [11/8 8/11], 8 [7/4 4/7], 9 [8/4 4/8]})
+;; Beta distribution parameters to use for drawing the severity of disease for each age&sex cohort
+;; The values are the age-severity values, but scaled by the reported sex difference observed in China
+;; TODOO(tsnyderr): Find the paper and link it here
 (def age-sex-severity (kvmap identity (partial apply id/beta-distribution)
                              (for [[age [a b]] age-severity
                                    [sex scale] [[:male 1.06] [:female 0.94]]]
                                [[age sex] [(* a scale) (/ b scale)]])))
+;; Distribution of number of children per household that has children
 (def household-children (normalize {1 14081, 2 12853, 3 4500, 4 2000, 5 400, 6 100}))
+;; Distribution of household size
 (def household-size (normalize {1 28, 2 34, 3 15, 4 13, 5 6, 6 2, 7 1, 8 0.2}))
+;; Distribution of household compositions
+;; Each element in the set maps to an identity below and are defined as follows:
+;;   mother - An adult female in a household with children
+;;   father - An adult male in a household with children
+;;   man - An adult male in a household without children
+;;   woman - An adult female in a household without children
+;;   parent - The parent (who is not the head of household) of adult man or woman (who is head of household)
+;;   other - An unrelated, non-coupled adult (i.e. roommate)
+;;   children - One or more children whose guardian is head of household
 (def households (normalize {#{:mother :father :children} 20, #{:man :woman} 28,
                             #{:mother :children} 7, #{:woman :parent} 6,
                             #{:father :children} 2, #{:man :parent} 2,
                             #{:man} 12, #{:man :other} 4,
                             #{:woman} 15, #{:woman :other} 3}))
+;; Distributions of age by identity
 (def identity-ages {:mother (normalize {2 20, 3 35, 4 35, 5 30, 6 5, 7 1}),
                     :father (normalize {2 15, 3 38, 4 38, 5 35, 6 10, 7 2}),
                     :man (normalize {1 5, 2 30, 3 34, 4 30, 5 25, 6 20, 7 10, 8 4, 9 1}),
@@ -40,6 +69,7 @@
                     :parent (normalize {4 10, 5 20, 6 30, 7 30, 8 20, 9 5})
                     :children (normalize {0 50, 1 40})
                     :other (normalize {2 43, 3 41, 4 41, 5 42, 6 36, 7 20, 8 8, 9 1})})
+;; Distribution of sex by identity
 (def identity-sexes {:mother {:female 1},
                      :father {:male 1},
                      :man {:male 1},
@@ -48,6 +78,8 @@
                      :children {:male 1/2, :female 1/2},
                      :other {:male 1/2, :female 1/2}})
 
+;; The draw function takes a sequence of key-value pairs, returning a key with probability value provided
+;; the sum of values equals 1.
 (defn draw [m]
   (or (reduce #(if (< %1 (second %2))
                  (reduced (first %2))
@@ -56,6 +88,10 @@
               m)
       (first (last m))))
 
+;; make-actors creates n actors in a virtual city
+;; Each actor belongs to a household, defined by :loc, chosen from a 2D normal distribution
+;; Each actor engages in a number of cluster types, as determined by cluster-types
+;; Household composition and actor ages are determined by demographic data defined above
 (defn make-actors [n cluster-types]
   (loop [i 0
          hh-id 0
@@ -108,9 +144,11 @@
                            {:loc [x y], :age age, :sex sex,
                             :severity severity, :cluster-names cts}))))))))
 
+;; round-location bins the location into one of d*d bins
 (defn round-location [[x y] d]
   [(/ (int (* x d)) d) (/ (int (* y d)) d)])
 
+;; index-locations bins the locations of objects
 (defn index-locations [objects d]
   (reduce #(update %1 (round-location (:loc %2) d) conj %2) {} objects))
 
@@ -119,9 +157,11 @@
     (- x)
     x))
 
+;; dist finds the L-1 distance (Manhatten block distance) between two locations
 (defn dist [[x1 y1] [x2 y2]]
   (+ (abs (- x1 x2)) (abs (- y1 y2))))
 
+;; make-clusters is deprecated in favor of make-clusters2
 (defn make-clusters [actors cluster-types]
   (let [actors (vec (map-indexed #(assoc %2 :id %1) actors))
         ckpt 1
@@ -190,6 +230,10 @@
         clusters (reduce #(assoc-in %1 [(first %2) :actors] (second %2)) clusters ac-by-cluster)]
     [actors clusters cluster-types]))
 
+;; make-actor-clusters creates clusters and pairings between actors and clusters
+;; clusters are instances of cluster type & subtype, as defined by cluster-types
+;; actors are assigned to clusters matching their type & subtype, and prefer
+;; instances that are closer to them based upon the cluster type locality preference
 (defn make-actor-clusters [actors cluster-types]
   (let [actors (vec (map-indexed #(assoc %2 :id %1) actors))
         ckpt 1
@@ -251,6 +295,7 @@
                          [(:id a) cluster])]
     [(vec clusters) actor-clusters]))
 
+;; make-clusters2 updates actors and clusters based upon the associations in actor-clusters
 (defn make-clusters2 [actors clusters actor-clusters]
   (let [actors (vec (map-indexed #(assoc %2 :id %1) actors))]
     (println (count actors) (count clusters) (count (filter #(> (count actors) (first %)) (take 100 actor-clusters))))
@@ -259,6 +304,7 @@
             [actors clusters]
             actor-clusters)))
 
+;; actor->day maps an actor's day key to a day's aggregate key
 (defn actor->day [k]
   (case k
     :contract-day :contractions
@@ -269,6 +315,14 @@
     :discharge-day :discharges
     nil))
 
+;; run-simulation runs the COVID transmission simulation until all no actor has the illness
+;; it starts by infecting n actors on day 0
+;; cluster-type-transmission-by-cases is sequence of [fn {}] pairs, where the function must
+;; accept the current day, the day-counts map, and the day-totals map; and the map indicates
+;; the level of spreading for the given cluster type; once the fn returns true, the next element
+;; becomes the active policy for the next day.
+;; The function returns the actors, updated with their day of contraction, illness, hospitalization, discharge, recovery, and/or death; the day-counts; the day-totals; and the days after which the policy, defined by
+;; cluster-type-transmission-by-cases, was changed.
 (defn run-simulation [[actors clusters] n cluster-type-transmission-by-cases]
   (let [i (repeatedly n #(rand-int (count actors)))]
     (loop [actors (reduce #(update %1 %2 assoc :contract-day 0, :illness-day 5, :recovery-day 20, :source -1) actors i)
@@ -312,9 +366,9 @@
                                             onset (int (+ 5 (* 13 (id/draw (id/beta-distribution 3 10)))))  ;; [2, 14] days of incubation, mean of 5
                                             ;; [7, 34] days of illness for most severe cases
                                             ;; [3, 15] days for the least severe still having symptoms
-                                            recovery (if (< severity (- 1 hospitalization-rate)) (+ onset (int (* (max 3/7 severity) (+ 7.5 (* 28 (id/draw (id/beta-distribution 4 4))))))))
+                                            recovery (if (< severity hospitalization-severity) (+ onset (int (* (max 3/7 severity) (+ 7.5 (* 28 (id/draw (id/beta-distribution 4 4))))))))
                                             hospitalization (if (nil? recovery) (+ onset 2 (int (* 13 (id/draw (id/beta-distribution 5 7))))))
-                                            death (if (> severity (- 1 death-rate)) (+ hospitalization (int (+ 1.5 (* 22 (id/draw (id/beta-distribution 3 9)))))))
+                                            death (if (> severity death-severity) (+ hospitalization (int (+ 1.5 (* 22 (id/draw (id/beta-distribution 3 9)))))))
                                             discharge (if (and hospitalization (nil? death)) (+ hospitalization (int (+ 1.5 (* 42 (id/draw (id/beta-distribution 9 15)))))))
                                             terms (apply conj {}
                                                          [:contract-day day]
@@ -351,6 +405,7 @@
             nil
             (recur actors (dissoc contagious day) (inc day) max-day day-counts total-counts (if policy-change (do (println "Switching to" (second cttd)) (next cttd)) cttd) (if policy-change (conj policy-change-days day) policy-change-days))))))))
 
+;; cluster type definition modeling Cobb County, GA with a population of 750,000.
 (def cobb-cluster-types [{:type :worship, :level :household, :multiplicity {0 2/3, 1 1/3},
                           :locality (id/beta-distribution 1 10),
                           :subtype {{:name :catholic, :count 5} 1/10,
@@ -393,6 +448,7 @@
                           :subtype (into {} (for [name (range 30)]
                                               [{:name (keyword (str "store" name)), :count 5} 1/30]))}])
 
+;; cluster type modeling a city of 6M actors. Scaled up version of Cobb County.
 (def atl-cluster-types [{:type :worship, :level :household, :multiplicity {0 2/3, 1 1/3},
                          :locality (id/beta-distribution 1 10),
                          :subtype {{:name :catholic, :count 30} 1/10,
@@ -435,6 +491,7 @@
                          :subtype (into {} (for [name (range 60)]
                                              [{:name (keyword (str "store" name)), :count 15} 1/30]))}])
 
+;; cluster type modeling a city of 100,000. Scaled down version of Cobb County.
 (def hundred-k-cluster-types [{:type :worship, :level :household, :multiplicity {0 2/3, 1 1/3},
                           :locality (id/beta-distribution 1 10),
                           :subtype {{:name :catholic, :count 1} 4/30,
@@ -473,6 +530,12 @@
                           :subtype (into {} (for [name (range 30)]
                                               [{:name (keyword (str "store" name)), :count (id/draw [1 1 1 1 1 2])} 1/30]))}])
 
+;; The following define the transmission rates for use within run-simulation.
+;; lvl0 - Nominal transmission rates with no social distancing
+;; lvl1 - Schools closed, some work moved to WFH, stores visited less frequently
+;; lvl2 - Schools closed, most work closed or WFH, most worship services stopped, grocers institute extra cleaning, stores visited rarely
+;; lvl3 - Schools closed, most work closed or WFH, nearly all worship services stopped, grocers institute additional protective policies, stores almost never visited
+;; lvl0_5 - Schools closed, some work moved to WFH, most values scaled by x
 (def lvl0 {:worship 0.005, :grocers 0.005, :work 0.03, :household 0.06, :store 0.0015, :school 0.05})
 (def lvl1 {:worship 0.005, :grocers 0.005, :work 0.02, :household 0.07, :store 0.001, :school 0})
 (defn lvl0_5 [x]
@@ -519,11 +582,14 @@
     (i/view p)
     p))
 
-(defn plot-sims [sims & [alignments]]
+(defn plot-sims [sims & [alignments atl-offset]]
   (let [p (ic/xy-plot)
-        sims&alignments (map vector (range) sims (or alignments (repeat (count sims) 0)))]
-    (ic/set-alpha p (/ (Math/pow (count sims) 0.5)))
-    (ic/set-stroke p :width 3)
+        sims&alignments (map vector (range) sims (or alignments (repeat (count sims) 0)))
+        atl-range (if atl-offset
+                    (range (- atl-offset) (- (count atl-hospitalizations) atl-offset))
+                    (range -10 (- (count atl-hospitalizations) 10)))]
+    ;(ic/set-alpha p (/ (Math/pow (count sims) 0.5)))
+    (ic/set-stroke p :width 0.1)
     (doseq [[j [actors data] offset] sims&alignments]
       (let [offset (or offset 0)
             max-days (inc (apply max (keys data)))
@@ -543,21 +609,23 @@
         ;; Add the cumulative lines
         (doseq [[lbl i c] [[:contractions 1 Color/orange] [:illnesses 2 Color/red]
                            [:recoveries 3 Color/green] [:deaths 4 Color/black]]]
-          (ic/add-lines p days (lbl totals))
+          (ic/add-lines p days [] #_(lbl totals))
           (ic/set-stroke-color p c :dataset (+ i (* j 8)))
           )
         ;; Add the healthy line
-        (ic/add-lines p days (map #(apply - (count actors) 0 (map (fn [a] (get-in data [a :contractions] 0)) (range %1))) (range max-days)))
+        (ic/add-lines p days [] #_(map #(apply - (count actors) 0 (map (fn [a] (get-in data [a :contractions] 0)) (range %1))) (range max-days)))
         (ic/set-stroke-color p Color/white :dataset (+ 5 (* j 8)))
         ;; Add the transmissive cases
-        (ic/add-lines p days contagious)
+        (ic/add-lines p days [] #_contagious)
         (ic/set-stroke-color p Color/magenta :dataset (+ 6 (* j 8)))
         ;; Add the hospital load
         (ic/add-lines p days (:hospitalizations totals))
         (ic/set-stroke-color p Color/cyan :dataset (+ 7 (* j 8)))
         (ic/add-lines p days hospitalizations)
-        (ic/set-stroke-color p Color/blue :dataset (+ 8 (* j 8)))
-        ))
+        (ic/set-stroke-color p Color/blue :dataset (+ 8 (* j 8)))))
+    (ic/add-lines p atl-range atl-hospitalizations)
+    (ic/set-stroke-color p (Color. 0 127 127) :dataset (+ 1 (* (count sims&alignments) 8)))
+    (ic/set-stroke p :width 3 :dataset (+ 1 (* (count sims&alignments) 8)))
     (i/view p)
     p))
 
@@ -654,4 +722,10 @@
      :total-deaths total-deaths
      :peak-hospitalizations peak-hospitalizations}))
 
-(def ga-hospitalizations [394 473 566 617 666 707 833 952 1056 1158 1239 1283 1332 1774 1993])
+;; hospitalization data for all of georgia, and approximated for Atlanta by prorating by deaths
+;;                    March 24  25  26  27  28  29  30  31                            
+                                        ;            April    1    2    3    4    5    6    7    8
+;;                     Day -10  -9  -8  -7  -6  -5  -4  -3   -2   -1    0    1    2    3    4    5
+(def ga-hospitalizations  [394 473 566 617 666 707 833 952 1056 1158 1239 1283 1332 1774 1993])
+(def atl-hospitalizations [219 232 278 301 325 341 360 423  492  556  624  677  707  750  820  961])
+(def atl-deaths           [ 20  20  20  34  40  41  52  63   79   90  104  111  118  141  158  166])
