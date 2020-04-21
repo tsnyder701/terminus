@@ -1,0 +1,10 @@
+team_name: Snyder Center for Computational Excellence
+team_abbr: SnyderCCE
+model_name: Terminus
+model_abbr: terminus
+model_contributors: Timothy L. Snyder <tsnyder701@gmail.com>
+data_source1: covidtracking.com
+interventionsYN: Yes
+interventions: I assume that continued social distancing and lockdown measures remain in place until June 1, then are slowly relaxed over the following two months.
+this_model_is_an_ensemble: FALSE
+methods: Terminus is a newly created Agent Based Model designed specifically for COVID-19.

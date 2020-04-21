@@ -11,3 +11,7 @@ pom.xml.asc
 .hgignore
 .hg/
 hs_err_pid16016.log
+*.csv
+*.pdf
+*.png
+*.svg

@@ -7,5 +7,5 @@
                  [incanter "1.9.3"]
                  ]
   :repl-options {:init-ns covid.core}
-  :jvm-opts ["-Xmx14g" "-server"])
+  :jvm-opts ["-Xmx12g" "-server"])
 
