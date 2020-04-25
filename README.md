@@ -1,10 +1,16 @@
-# covid
+# Terminus
 
-A Clojure library designed to ... well, that part is up to you.
+A Clojure library implementing an Agent-Based Model (ABM) for simulating
+an infectious disease outbreak at a local level.
+
+The simulator is currently set up for modeling COVID-19, but with some
+minor change, could model other diseases as well.
 
 ## Usage
 
-FIXME
+1. Create a graph
+2. Run the simulation function
+3. Graph and analyze the results
 
 ## License
 

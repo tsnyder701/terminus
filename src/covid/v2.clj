@@ -22,6 +22,14 @@
 
 (def halt-flag (atom false))
 
+(def atl-isolation-severity 0.3)
+(def atl-hospitalization-severity 0.885)
+(def atl-death-severity 0.975)
+
+(def chi-isolation-severity 0.3)
+(def chi-hospitalization-severity 0.96)
+(def chi-death-severity 0.8694)
+
 ;; kvmap transforms a map by applying kf to each key and vf to each value
 ;; kf should be one-to-one or the output is undefined
 (defn kvmap [kf vf m]
@@ -341,7 +349,7 @@
 ;; becomes the active policy for the next day.
 ;; The function returns the actors, updated with their day of contraction, illness, hospitalization, discharge, recovery, and/or death; the day-counts; the day-totals; and the days after which the policy, defined by
 ;; cluster-type-transmission-by-cases, was changed.
-(defn run-simulation [[actors clusters] n cluster-type-transmission-by-cases & {:keys [verbosity] :or {verbosity 0}}]
+(defn run-simulation [[actors clusters] n cluster-type-transmission-by-cases & {:keys [verbosity isolation-severity hospitalization-severity death-severity] :or {verbosity 0, isolation-severity isolation-severity, hospitalization-severity hospitalization-severity, death-severity death-severity}}]
   (let [i (repeatedly n #(rand-int (count actors)))]
     (loop [actors (reduce #(update %1 %2 assoc :contract-day 0, :illness-day 5, :recovery-day 20, :source -1) actors i)
            contagious {10 (vec i)}
@@ -381,13 +389,11 @@
                                           ;; to be exposed based upon the transmission rate for the location.
                                           :when (and (< day (get-in actors [actor-id :contract-day] 1e6)))]
                                       (let [severity (:severity (actors actor-id))  ;; based upon age
-                                            onset (int (+ 5 (* 13 (id/draw (id/beta-distribution 3 10)))))  ;; [2, 14] days of incubation, mean of 5
-                                            ;; [7, 34] days of illness for most severe cases
-                                            ;; [3, 15] days for the least severe still having symptoms
-                                            recovery (if (< severity hospitalization-severity) (+ onset (int (* (max 3/7 severity) (+ 7.5 (* 28 (id/draw (id/beta-distribution 4 4))))))))
-                                            hospitalization (if (nil? recovery) (+ onset 2 (int (* 13 (id/draw (id/beta-distribution 5 7))))))
-                                            death (if (> severity death-severity) (+ hospitalization (int (+ 1.5 (* 22 (id/draw (id/beta-distribution 2 9)))))))
-                                            discharge (if (and hospitalization (nil? death)) (+ hospitalization (int (+ 1.5 (* 42 (id/draw (id/beta-distribution 9 15)))))))
+                                            onset (int (+ 2 (* 13 (id/draw (id/beta-distribution 3 10)))))  ;; [2, 14] days of incubation, mean of 5
+                                            hospitalization (if (< hospitalization-severity severity) (+ onset 2 (int (* 13 (id/draw (id/beta-distribution 2 3))))))
+                                            death (if (> severity death-severity) (+ hospitalization (int (+ 1.5 (* 10 (id/draw (id/beta-distribution 1 2)))))))
+                                            discharge (if (and hospitalization (nil? death)) (+ hospitalization (int (+ 1.5 (* 10 (id/draw (id/beta-distribution 1 2)))))))
+                                            recovery (+ onset (int (* (max 3/7 severity) (+ 7.5 (* 28 (id/draw (id/beta-distribution 4 4)))))))
                                             terms (apply conj {}
                                                          [:contract-day day]
                                                          [:source (:id a)]
@@ -395,7 +401,7 @@
                                                          [:illness-day (+ day onset)]
                                                          (cond
                                                            death [[:hospitalization-day (+ day hospitalization)] [:death-day (+ day death)]]
-                                                           discharge [[:hospitalization-day (+ day hospitalization)] [:recovery-day (+ day discharge)] [:discharge-day (+ day discharge)]]
+                                                           discharge [[:hospitalization-day (+ day hospitalization)] [:recovery-day (+ day (max recovery discharge))] [:discharge-day (+ day discharge)]]
                                                            :default [[:recovery-day (+ day recovery)]]))]
                                         (if (<= 3 verbosity) (println "day" day ":" (:id a) "->" actor-id "at" (dissoc cluster :actors)))
                                         {actor-id terms})))
@@ -558,16 +564,17 @@
 (def lvl1 {:worship 0.005, :grocers 0.005, :work 0.02, :household 0.07, :store 0.001, :school 0})
 (defn lvl0_5 [x]
   {:worship (* 0.005 x) :grocers (* 0.005 x) :work (* 0.02 x) :household 0.07 :store (* 0.001 x) :school 0})
+(def lvl1_5 {:worship 0.002, :grocers 0.003, :work 0.008, :household 0.07, :store 0.0005, :school 0})
 (def lvl2 {:worship 0.002, :grocers 0.0025, :work 0.005, :household 0.07, :store 0.0003, :school 0})
 (def lvl3 {:worship 0.00125, :grocers 0.00125, :work 0.005, :household 0.08, :store 0.000025, :school 0})
 (def lvl4 {:worship 0.0, :grocers 0.0, :work 0.0, :household 0.0, :store 0.0, :school 0})
 (defn fuzz [m mean sd]
   (kvmap identity #(* % (Math/exp (id/draw (id/normal-distribution mean sd)))) m))
 
-(defn plot-line [p xs ys c w ds & [n]]
+(defn plot-line [p xs ys c w ds & [n dash]]
   (ic/add-lines p xs ys :series-label n)
   (ic/set-stroke-color p c :dataset ds)
-  (ic/set-stroke p :width w :dataset ds))
+  (apply ic/set-stroke p :width w :dataset ds (if dash [:dash dash])))
 
 (defn plot-legend []
   (doto (ic/xy-plot [] [] :series-label "Exposures")
@@ -587,18 +594,27 @@
     (ic/set-stroke :width 3 :dataset 1)
     (ic/add-points [] [] :series-label "Observed Deaths")))
 
+(defn plot-legend-hospitalizations []
+  (doto (ic/xy-plot [] [] :series-label "Mean Hospital Census")
+    (ic/set-stroke-color (Color. 0. 0. 1.))
+    (ic/set-stroke :width 5)
+    (ic/add-lines [] [] :series-label "Mean Hospitalizations")
+    (ic/set-stroke-color (Color. 0. 0.5 0.5) :dataset 1)
+    (ic/set-stroke :width 5 :dataset 1)
+    (ic/add-points [] [] :series-label "Observed Hospitalizations")))
+
 (defn plot-sim [[actors data _ policy-change-days]]
   (let [p (ic/xy-plot)
         max-days (inc (apply max (keys data)))
         sorted-data (sort data)
         totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
-                          [lbl (vec (reductions + 0 (map #(get-in data [% lbl] 0) (range max-days))))]))
+                          [lbl (vec (reductions + (map #(get-in data [% lbl] 0) (range max-days))))]))
         contagious (drop 2
                      (reductions +
-                        0 (map - (concat (map #(get % :illnesses 0) (map data (range max-days))) (repeat 7 0))
+                        (map - (concat (map #(get % :illnesses 0) (map data (range max-days))) (repeat 7 0))
                               (concat (repeat 7 0) (map #(get % :illnesses 0) (map data (range max-days)))))))
         hospitalizations (reductions +
-                           0 (map #(- %1 %2)
+                           (map #(- %1 %2)
                                 (map #(get-in data [% :hospitalizations] 0) (range max-days))
                                 (map #(+ (get-in data [% :discharges] 0)
                                          (get-in data [% :deaths] 0)) (range max-days))))]
@@ -628,13 +644,13 @@
   (let [max-days (inc (apply max (keys data)))
         sorted-data (sort data)
         totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
-                          [lbl (vec (reductions + 0 (map #(get-in data [% lbl] 0) (range max-days))))]))
+                          [lbl (vec (reductions + (map #(get-in data [% lbl] 0) (range max-days))))]))
         contagious (drop 2
                      (reductions +
-                        0 (map - (concat (map #(get % :illnesses 0) (map data (range max-days))) (repeat 7 0))
+                        (map - (concat (map #(get % :illnesses 0) (map data (range max-days))) (repeat 7 0))
                               (concat (repeat 7 0) (map #(get % :illnesses 0) (map data (range max-days)))))))
         hospitalizations (reductions +
-                           0 (map #(- %1 %2)
+                           (map #(- %1 %2)
                                 (map #(get-in data [% :hospitalizations] 0) (range max-days))
                                 (map #(+ (get-in data [% :discharges] 0)
                                          (get-in data [% :deaths] 0)) (range max-days))))
@@ -663,13 +679,13 @@
             days (range (- offset) (- max-days offset))
             sorted-data (sort data)
             totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
-                              [lbl (vec (reductions + 0 (map #(get-in data [% lbl] 0) (range max-days))))]))
+                              [lbl (vec (reductions + (map #(get-in data [% lbl] 0) (range max-days))))]))
             contagious (drop 2
                              (reductions +
-                                         0 (map - (concat (map #(get % :illnesses 0) (map data (range max-days))) (repeat 7 0))
+                                         (map - (concat (map #(get % :illnesses 0) (map data (range max-days))) (repeat 7 0))
                                                 (concat (repeat 7 0) (map #(get % :illnesses 0) (map data (range max-days)))))))
             hospitalizations (reductions +
-                                         0 (map #(- %1 %2)
+                                         (map #(- %1 %2)
                                                 (map #(get-in data [% :hospitalizations] 0) (range max-days))
                                                 (map #(+ (get-in data [% :discharges] 0)
                                                          (get-in data [% :deaths] 0)) (range max-days))))]
@@ -702,16 +718,16 @@
         sims (filter #(not (empty? (nth % 3))) sims)
         alpha 1.0
         max-days (inc (apply max (for [[_ data _ pc] sims
-                                       :let [offset (first pc)]
+                                       :let [offset (second pc)]
                                        [k] data]
                                    (- k offset))))
         min-days (- (apply max (for [[_ _ _ pc] sims]
-                                 (first pc))))
+                                 (second pc))))
         rs (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
                       [lbl (apply map #(sort %&)
                                   (for [[_ data _ pc] sims
-                                        :let [offset (first pc)]]
-                                    (reductions + 0 (map #(get-in data [% lbl] 0)
+                                        :let [offset (second pc)]]
+                                    (reductions + (map #(get-in data [% lbl] 0)
                                                          (range (+ offset min-days)
                                                                 (+ offset max-days))))))]))
         totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
@@ -764,7 +780,7 @@
     (i/view p)
     p))
 
-(defn plot-deaths [sims & [alignments title x-axis actuals]]
+(defn plot-deaths [sims & [alignments title x-axis actuals actuals-range]]
   (let [p (ic/xy-plot [] [] :title title :x-label x-axis :y-label "Population")
         sims&alignments (map vector (range) sims (or alignments (repeat (count sims) 0)))
         alpha (float (/ (Math/pow (count sims) 0.75)))
@@ -781,13 +797,14 @@
     (ic/add-lines p (i/sel avg-ds :cols :aligned-day) (i/sel avg-ds :cols :deaths-sum))
     (ic/set-stroke-color p (Color. 0 0 0) :dataset (+ 1 (count sims)))
     (ic/set-stroke p :width 5 :dataset (+ 1 (count sims)))
-    (ic/add-points p (range (count actuals)) actuals)
+    (ic/add-points p actuals-range actuals)
     (i/view p)
     (.addLegend p (org.jfree.chart.title.LegendTitle. (.getPlot (plot-legend-deaths))))
     p))
 
-(defn plot-hospitalizations [sims & [alignments title x-axis]]
-  (let [p (ic/xy-plot [] [] :title title :x-label x-axis :y-label "Population")
+(defn plot-hospitalizations [sims & [alignments title x-axis actuals actuals-range p ds]]
+  (let [p (or p (ic/xy-plot [] [] :title title :x-label x-axis :y-label "Population"))
+        ds (or ds 0)
         sims (filter #(not (empty? (nth % 3))) sims)
         sims&alignments (map vector (drop 1 (range)) sims (or alignments (repeat (count sims) 0)))
         max-days (inc (apply max (for [[_ [_ data] offset] sims&alignments
@@ -797,11 +814,16 @@
                                  offset)))
         avgs (vec (apply map #(avg %&)
                              (for [[_ [_ data] offset] sims&alignments]
-                               (reductions + 0 (map #(- (get-in data [% :hospitalizations] 0)
-                                                        (get-in data [% :discharges] 0)
-                                                        (get-in data [% :deaths] 0))
-                                                    (range (+ offset min-days)
-                                                           (+ offset max-days)))))))
+                               (reductions + (map #(- (get-in data [% :hospitalizations] 0)
+                                                      (get-in data [% :discharges] 0)
+                                                      (get-in data [% :deaths] 0))
+                                                  (range (+ offset min-days)
+                                                         (+ offset max-days)))))))
+        census-avgs (vec (apply map #(avg %&)
+                                (for [[_ [_ data] offset] sims&alignments]
+                                  (reductions + (map #(get-in data [% :hospitalizations] 0)
+                                                     (range (+ offset min-days)
+                                                            (+ offset max-days)))))))
         alpha (float (/ (Math/pow (count sims) 0.75)))]
     (doseq [[j [actors data] offset] sims&alignments]
       (let [offset (or offset 0)
@@ -809,16 +831,21 @@
             days (range (- offset) (- max-days offset))
             sorted-data (sort data)
             hospitalizations (reductions +
-                                         0 (map #(- %1 %2)
+                                         (map #(- %1 %2)
                                                 (map #(get-in data [% :hospitalizations] 0) (range max-days))
                                                 (map #(+ (get-in data [% :discharges] 0)
-                                                         (get-in data [% :deaths] 0)) (range max-days))))]
+                                                         (get-in data [% :deaths] 0)) (range max-days))))
+            census (reductions +
+                               (map #(get-in data [% :hospitalizations] 0) (range max-days)))]
         ;; Add the hospital load
-        (plot-line p days hospitalizations (Color. 0.0 0.0 1.0 alpha) 1 j)))
-    (plot-line p (range min-days max-days) avgs (Color. 0.0 0.0 1.0) 4 (+ 1 (count sims)))
-    #_(ic/add-lines p atl-range atl-hospitalizations)
-    #_(ic/set-stroke-color p (Color. 0 127 127) :dataset (+ 1 (* (count sims&alignments) 8)))
-    #_(ic/set-stroke p :width 13 :dataset (+ 1 (* (count sims&alignments) 8)))
+        (plot-line p days hospitalizations (Color. 0.0 0.0 1.0 alpha) 1 (+ ds -1 (* 2 j)))
+        (plot-line p days census (Color. 0.0 0.8 0.8 alpha) 1 (+ ds (* 2 j)))))
+    (plot-line p (range min-days max-days) avgs (Color. 0.0 0.0 1.0) 4 (+ ds 1 (* 2 (count sims))))
+    (plot-line p (range min-days max-days) census-avgs (Color. 0.0 0.50 0.50) 4 (+ ds 2 (* 2 (count sims))))
+    (ic/add-points p actuals-range actuals)
+    ;(ic/set-stroke-color p (Color. 0 127 127) :dataset (+ 1 (* (count sims&alignments))))
+    ;(ic/set-stroke p :width 13 :dataset (+ 1 (* (count sims&alignments))))
+    (.addLegend p (org.jfree.chart.title.LegendTitle. (.getPlot (plot-legend-hospitalizations))))
     (i/view p)
     p))
 
@@ -979,12 +1006,13 @@
      :alignment-offset offset}))
 
 ;; hospitalization data for all of georgia, and approximated for Atlanta by prorating by deaths
-;;                    March 24  25  26  27  28  29  30  31                            
-                                        ;            April   1    2    3    4    5    6    7    8    9   10
-;;                     Day -10  -9  -8  -7  -6  -5  -4  -3  -2   -1    0    1    2    3    4    5    6    7
-(def ga-hospitalizations  [361 394 473 566 617 666 707 833 952 1056 1158 1239 1283 1332 1774 1993 2159 2351])
-(def atl-hospitalizations [219 232 278 301 325 341 360 423 492  556  624  677  707  750  820  916  968 1061])
-(def atl-deaths           [ 20  20  20  34  40  41  52  63  79   90  104  111  118  141  158  166  183  190])
+;;                    March 25  26  27  28  29  30  31                            
+;;                                               April   1    2    3    4    5    6    7    8    9   10
+;;                     Day  -9  -8  -7  -6  -5  -4  -3  -2   -1    0    1    2    3    4    5    6    7
+(def ga-hospitalizations  [394 473 566 617 666 707 833 952 1056 1158 1239 1283 1332 1774 1993 2159 2351 2479 2505 2589 2769 2922 3108 3324 3420 3464 3550 3779 3959 4069])
+(def atl-hospitalizations [171 172 296 316 333 360 420 488  543  611  664  691  643  810  899  966 1055 1102 1116 1154 1252 1339 1405 1515 1566 1589 1613 1714 1785 1806])
+(def atl-deaths           [ 20  20  34  40  41  52  63  79   90  104  111  118  141  158  166  183  189  192  197  197  237  264  279  304  309  316  349  371  381  391])
+(def atl-actuals-range (range -9 (+ (count atl-deaths) -9)))
 
 ;; hospitalization and death data for San Diego County, CA.
 ;;                               *           *
@@ -1042,3 +1070,23 @@
                              (i/$order :aligned-day :asc))))
         avg-ds (i/dataset (i/col-names avg-ds) (i/$map #(map float %&) (i/col-names avg-ds) avg-ds))]
     avg-ds))
+
+(defn sims->dataset [sims alignment]
+  (let [min-days (- (apply max alignment))
+        max-days (apply max (map #(- (apply max (keys (nth %1 2))) %2) sims alignment))]
+    (i/dataset (for [day (range min-days max-days)
+                     [id sim offset] (map vector (range) sims alignment)
+                     :let [totals (get-in sim [2 (+ day offset)] {})]]
+                 (into {:id id, :day day}
+                       (for [lbl [:illnesses :hospitalizations :discharges :deaths :recoveries]]
+                         [lbl (get totals lbl 0)]))))))
+
+(defn stats [sims alignment day lbl]
+  (let [ds (sims->dataset sims alignment)
+        n (dec (count sims))
+        data (sort (i/sel (i/$where {:day day} ds) :cols lbl))
+        p05 (* 0.05 n)
+        p50 (* 0.5 n)
+        p95 (* 0.95 n)]
+    (vec (map #(avg [(nth data (int %)) (nth data (inc (int %)))] [(- % (int %)) (- (inc (int %)) %)])
+              [p05 p50 p95]))))
