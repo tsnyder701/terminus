@@ -389,7 +389,7 @@
                                           ;; to be exposed based upon the transmission rate for the location.
                                           :when (and (< day (get-in actors [actor-id :contract-day] 1e6)))]
                                       (let [severity (:severity (actors actor-id))  ;; based upon age
-                                            onset (int (+ 2 (* 13 (id/draw (id/beta-distribution 3 10)))))  ;; [2, 14] days of incubation, mean of 5
+                                            onset (int (+ 2 (* 13 (id/draw (id/beta-distribution 2 3)))))  ;; [2, 14] days of incubation, mean of 5
                                             hospitalization (if (< hospitalization-severity severity) (+ onset 2 (int (* 13 (id/draw (id/beta-distribution 2 3))))))
                                             death (if (> severity death-severity) (+ hospitalization (int (+ 1.5 (* 10 (id/draw (id/beta-distribution 1 2)))))))
                                             discharge (if (and hospitalization (nil? death)) (+ hospitalization (int (+ 1.5 (* 10 (id/draw (id/beta-distribution 1 2)))))))
