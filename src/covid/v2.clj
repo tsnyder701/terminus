@@ -389,7 +389,7 @@
                                           ;; to be exposed based upon the transmission rate for the location.
                                           :when (and (< day (get-in actors [actor-id :contract-day] 1e6)))]
                                       (let [severity (:severity (actors actor-id))  ;; based upon age
-                                            onset (int (+ 2 (* 13 (id/draw (id/beta-distribution 2 3)))))  ;; [2, 14] days of incubation, mean of 5
+                                            onset (int (+ 2 (* 13 (id/draw (id/beta-distribution 3 10)))))  ;; [2, 14] days of incubation, mean of 5
                                             hospitalization (if (< hospitalization-severity severity) (+ onset 2 (int (* 13 (id/draw (id/beta-distribution 2 3))))))
                                             death (if (> severity death-severity) (+ hospitalization (int (+ 1.5 (* 10 (id/draw (id/beta-distribution 1 2)))))))
                                             discharge (if (and hospitalization (nil? death)) (+ hospitalization (int (+ 1.5 (* 10 (id/draw (id/beta-distribution 1 2)))))))
@@ -712,21 +712,19 @@
     (.addLegend p (org.jfree.chart.title.LegendTitle. (.getPlot (plot-legend))))
     p))
 
-(defn plot-avgs [sims & [p avg-only]]
-  (let [j (if p (count sims) 0)
+(defn plot-avgs [sims & [alignment p avg-only]]
+  (let [alignment (or alignment (repeat 0))
+        j (if p (count sims) 0)
         p (or p (ic/xy-plot))
         sims (filter #(not (empty? (nth % 3))) sims)
         alpha 1.0
-        max-days (inc (apply max (for [[_ data _ pc] sims
-                                       :let [offset (second pc)]
+        max-days (inc (apply max (for [[[_ data] offset] (map vector sims alignment)
                                        [k] data]
                                    (- k offset))))
-        min-days (- (apply max (for [[_ _ _ pc] sims]
-                                 (second pc))))
+        min-days (- (apply max alignment))
         rs (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
                       [lbl (apply map #(sort %&)
-                                  (for [[_ data _ pc] sims
-                                        :let [offset (second pc)]]
+                                  (for [[[_ data] offset] (map vector sims alignment)]
                                     (reductions + (map #(get-in data [% lbl] 0)
                                                          (range (+ offset min-days)
                                                                 (+ offset max-days))))))]))
@@ -871,7 +869,7 @@
         daily-ds (i/dataset #_[:id :day :exposures :illnesses :hospitalizations :discharges
                              :recoveries :deaths]
                             (for [id (range (count sims))
-                                  :let [offset (last (nth (nth sims id) 3))
+                                  :let [offset (:alignment-offset (nth sums id))
                                         offset-days (map #(+ % offset) days)
                                         dailies (map (second (nth sims id)) offset-days)
                                         totals (reductions #(merge-with + %1 %2) dailies)]
