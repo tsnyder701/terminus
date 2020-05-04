@@ -920,14 +920,15 @@
           (Thread/sleep 100)
           (recur (into s nn) nn (conj c (count nn))))))))
 
-(defn calc-r [[actors] days]
-  (let [days (if (number? days) #{days} (into #{} days))
-        infected (into #{} (map :id (filter #(days (get % :contract-day 1e7)) actors)))
-        spreads (frequencies (vals (frequencies (filter infected (map :source actors)))))
-        num (float (reduce + (map (partial apply *) spreads)))
-        denom (count infected)                    ;(float (reduce + (vals spreads)))
-        ]
-    (/ num denom)))
+(defn calc-r [[actors _ _ _] days]
+  (if actors
+    (let [days (if (number? days) #{days} (into #{} days))
+          infected (into #{} (map :id (filter #(days (get % :contract-day 1e7)) actors)))
+          spreads (frequencies (vals (frequencies (filter infected (map :source actors)))))
+          num (float (reduce + (map (partial apply *) spreads)))
+          denom (count infected)                    ;(float (reduce + (vals spreads)))
+          ]
+      (/ num denom))))
 
 (defn calc-r0 [[actors data _ policy-changes]]
   (let [data-days (map second (sort data))
@@ -1010,11 +1011,13 @@
 
 ;; hospitalization data for all of georgia, and approximated for Atlanta by prorating by deaths
 ;;                    March 25  26  27  28  29  30  31                            
-;;                                               April   1    2    3    4    5    6    7    8    9   10
+;;                                               April   1    2    3    4    5    6    7    8    9   10   11   12   13   14   15   16   17   18   19   20   21   22   23   24   25   26   27   28   29   30
+;;                                                                                          May    1    2    3
 ;;                     Day  -9  -8  -7  -6  -5  -4  -3  -2   -1    0    1    2    3    4    5    6    7
-(def ga-hospitalizations  [394 473 566 617 666 707 833 952 1056 1158 1239 1283 1332 1774 1993 2159 2351 2479 2505 2589 2769 2922 3108 3324 3420 3464 3550 3779 3959 4069])
-(def atl-hospitalizations [171 172 296 316 333 360 420 488  543  611  664  691  643  810  899  966 1055 1102 1116 1154 1252 1339 1405 1515 1566 1589 1613 1714 1785 1806])
-(def atl-deaths           [ 20  20  34  40  41  52  63  79   90  104  111  118  141  158  166  183  189  192  197  197  237  264  279  304  309  316  349  371  381  391])
+(def ga-hospitalizations  [394 473 566 617 666 707 833 952 1056 1158 1239 1283 1332 1774 1993 2159 2351 2479 2505 2589 2769 2922 3108 3324 3420 3464 3550 3779 3959 4069 4221 4326 4359 4681 4814 5056 5156 5269 5387 5393])
+(def atl-hospitalizations [171 172 296 316 333 360 420 488  543  611  664  691  643  810  899  966 1055 1102 1116 1154 1252 1339 1405 1515 1566 1589 1613 1714 1785 1806 1899 1940 1972 2137 2197 2308 2382 2476 2537 2534])
+(def ga-deaths            [ 46  55  65  78  82 102 125 154  175  197  207  219  292  346  368  409  421  432  442  442  523  575  616  666  674  688  767  816  843  879  896  903  913  990 1031 1091 1130 1164 1172 1179])
+(def atl-deaths           [ 20  20  34  40  41  52  63  79   90  104  111  118  141  158  166  183  189  192  197  197  237  264  279  304  309  316  349  371  381  391  403  405  413  452  472  498  522  547  552  554])
 (def atl-actuals-range (range -9 (+ (count atl-deaths) -9)))
 
 ;; hospitalization and death data for San Diego County, CA.
@@ -1029,14 +1032,38 @@
 ;;                                               April  1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22
 (def chi-deaths [nil nil 4  5 nil nil  15  15 nil  26 nil  43 nil nil nil  98 118 177 196 196 212 258 277 308 347 386 420 488 500 538 593 627])
 
+;; death data for Barcelona, Spain; March 1 - April 29
+(def bar-deaths [0 1 1 2 2 2 2 2 3 4 7 11 20 35 41 58 75 114 164 229 304 391 497 614 759 906 1070 1234 1393 1585 1755 1922 2081 2229 2378 2510 2652 2777 2922 3052 3181 3314 3431 3533 3636 3744 3855 3965 4059 4157 4229 4320 4390 4457 4517 4571 4610 4619 4871 4892])
+(def bar-deaths-range (range -14 (- (count bar-deaths) 14)))
+
+;; death data for Greece (from Wikipedia); March 12 - May 1
+(def greece-deaths [1 1 3 4 4 5 5 6 10 13 15 17 20 22 26 28 32 38 43 49 50 53 59 68 73 79 81 83 86 90 93 98 99 101 102 105 108 110 113 116 121 121 125 130 130 134 136 138 139 140 140])
+(def greece-deaths-range (range -4 (+ -4 (count greece-deaths))))
+
 (defn avg
   ([x] (/ (reduce + 0.0 x) (float (count x))))
   ([x y] (let [x&y (filter (fn [[x y]] (and x y)) (map vector x y))]
                      (/ (reduce + 0.0 (map (partial apply *) x&y)) (reduce #(+ %1 (second %2)) 0.0 x&y)))))
 
-(defn score [[_ _ totals pc] offset kw actuals]
-  (let [hs (map #(get % kw 0) (take (count actuals) (drop offset (map totals (range)))))]
-    (Math/sqrt (/ (reduce + (map #(* % %) (map - actuals hs))) (count actuals)))))
+(defn score [[_ _ totals pc] offset kw actuals actuals-range]
+  (try
+    (let [hs (map #(get-in totals [(+ offset %) kw] 0) actuals-range)]
+      (Math/sqrt (/ (reduce + (map #(* % %) (map - actuals hs))) (count actuals))))
+    #_(catch Exception e nil)))
+
+(defn least-score [sim offset width kw actuals actuals-range]
+  (apply min (for [o (range (- offset width) (+ offset width 1))]
+               (score sim o kw actuals actuals-range))))
+
+(defn score2 [[_ _ totals pc] offset kw actuals]
+  (try
+    (let [hs (map #(get % kw 0) (take (count actuals) (drop offset (map totals (range)))))]
+      (Math/sqrt (/ (reduce + (map #(* % %) (map #(/ (- %1 %2) (+ %2)) hs actuals))) (count actuals))))
+    (catch Exception e nil)))
+
+(defn least-score2 [sim offset width kw actuals]
+  (apply min (for [o (range (- offset width) (+ offset width 1))]
+               (score2 sim o kw actuals))))
 
 (defn avg-sims [sims & [alignment]]
   (let [alignment (or alignment (repeat nil))
@@ -1082,6 +1109,19 @@
                  (into {:id id, :day day}
                        (for [lbl [:illnesses :hospitalizations :discharges :deaths :recoveries]]
                          [lbl (get totals lbl 0)]))))))
+
+(defn dataset->sim [avg-ds]
+  (let [kws [[:exposures :contractions] [:illnesses :illnesses] [:hospitalizations :hospitalizations]
+             [:discharges :discharges] [:recoveries :recoveries] [:deaths :deaths]]
+        min-day (apply min (i/sel avg-ds :cols :aligned-day))
+        day-count (into {} (for [day (i/sel avg-ds :cols :aligned-day)]
+                             [(int (- day min-day)) (into {} (for [[kw1 kw2] kws]
+                                             [kw2 (i/sel (i/$where {:aligned-day day} avg-ds) :cols kw1)]))]))
+        day-total (into {} (for [day (i/sel avg-ds :cols :aligned-day)]
+                             [(int (- day min-day)) (into {} (for [[kw1 kw2] kws
+                                                 :let [kw1 (keyword (str (name kw1) "-sum"))]]
+                                             [kw2 (i/sel (i/$where {:aligned-day day} avg-ds) :cols kw1)]))]))]
+    [nil day-count day-total [(int (- min-day))]]))
 
 (defn stats [sims alignment day lbl]
   (let [ds (sims->dataset sims alignment)
@@ -1193,6 +1233,7 @@
                            compartments
                            (get next-transitions day {}))
             today-counts (apply merge-with +
+                                {:day 1, (keyword (str "policy-" (count policy-changes) "-day")) 1}
                                 (for [[x v] (next-transitions day)
                                       :let [k (transition=>day x)]
                                       :when k]
@@ -1208,3 +1249,137 @@
                next-policy-changes
                next-day-counts
                next-day-totals)))))
+
+(defn fixed-distribute [n dist low high]
+  (let [cdf (map #(id/cdf dist (/ (- % (dec low)) (inc (- high low))))
+                 (range low (inc high)))
+        icdf (map vector (range low (inc high)) cdf)]
+    (reduce (fn [[q n m] [i p]] (if (or (<= n 0) (>= (/ (- p q) (- 1 q)) 1.0))
+                                  (reduced (assoc m i n))
+                                  (let [x (* n (/ (- p q) (- 1 q)))]
+                                    [p (- n x) (assoc m i x)])))
+            [0 n {}] icdf)))
+
+(defn run-simulation3 [actor-count n policies & {:keys [verbosity isolation-severity hospitalization-severity death-severity day-limit] :or {verbosity 0, isolation-severity isolation-severity, hospitalization-severity hospitalization-severity, death-severity death-severity, day-limit 500}}]
+  (let [incubations-distrib (fixed-distribute 1 (id/beta-distribution 3 10) 2 14)
+        a-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 4 4) 7 14)
+        hospitalizations-distrib (fixed-distribute 1 (id/beta-distribution 2 3) 2 14)
+        i-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 4 7) 7 35)
+        deaths-distrib (fixed-distribute 1 (id/beta-distribution 1 2) 1 11)
+        discharges-distrib (fixed-distribute 1 (id/beta-distribution 3 3) 4 24)
+        d-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 3 6) 1 7)]
+    (loop [day 1
+           transitions {0 {[:susceptible :exposed] n}, 3 {[:exposed :pre-symptomatic] n} 5, {[:pre-symptomatic :ill] n}, 20 {[:ill :recovered] n}}
+           compartments {:susceptible (- actor-count n), :exposed n, :pre-symptomatic 0, :asymptomatic 0, :ill 0, :hospitalized 0, :discharged 0, :recovered 0, :dead 0}
+           policy-changes []
+           day-counts {0 {:contractions n}}
+           day-totals {0 {:contractions n}}]
+      (if (or (< day-limit day) (every? #(> 1 (compartments %)) [:exposed :pre-symptomatic :asymptomatic :ill :hospitalized :discharged]))
+        (let [contagious-portion (/ (get-in day-totals [(dec day) :illnesses])
+                                    (get-in day-totals [(dec day) :contagious]))
+              day-counts (reduce #(assoc-in %1 [%2 :r] (/ (get-in day-counts [%2 :contractions] 0.0)
+                                                          (max 1 (get-in day-counts [%2 :contagious] 1.0))
+                                                          contagious-portion))
+                                 day-counts (filter #(not= 0 %) (keys day-counts)))
+              day-counts (reduce #(assoc-in %1 [%2 :r0] (/ (get-in day-counts [%2 :contractions] 0.0)
+                                                           (max 1 (get-in day-counts [%2 :contagious] 1.0))
+                                                           contagious-portion
+                                                           (max 1e-10 (get-in day-counts [%2 :susceptible-rate] 1e-10))))
+                                 day-counts (filter #(not= 0 %) (keys day-counts)))]
+          [nil day-counts day-totals policy-changes compartments transitions])
+        (let [contagious (+ (compartments :pre-symptomatic) (compartments :asymptomatic) (int (* 1/4 (compartments :ill))))
+              susceptible-rate (/ (compartments :susceptible) actor-count)
+              transmission-rate (second (nth policies (count policy-changes)))
+              samples (int (* interaction-count 4 contagious susceptible-rate))
+              exposures (if (zero? samples)
+                          0
+                          (min (compartments :susceptible)
+                               (* samples transmission-rate)))
+              incubations (kvmap #(+ day %) #(* exposures %) incubations-distrib)
+              pre-symptomatic (kvmap #(- % 2) identity incubations)
+              asymptomatic (into {} (for [[d x] incubations]
+                                      [d (* x isolation-severity)]))
+              a-recoveries (apply merge-with +
+                                  (for [[d x] asymptomatic]
+                                    (kvmap #(+ d %) #(* x %) a-recoveries-distrib)))
+              ill (merge-with - incubations asymptomatic)
+              will-hospitalize (into {} (for [[d x] ill
+                                              :let [p (/ (- 1 hospitalization-severity)
+                                                         (- 1 isolation-severity))]]
+                                          [d (* x p)]))
+              hospitalizations (apply merge-with +
+                                      (for [[d x] will-hospitalize]
+                                        (kvmap #(+ d %) #(* x %) hospitalizations-distrib)))
+              will-not-hospitalize (merge-with - ill will-hospitalize)
+              i-recoveries (apply merge-with +
+                                  (for [[d x] will-not-hospitalize]
+                                    (kvmap #(+ d %) #(* x %) i-recoveries-distrib)))
+              will-die (into {} (for [[d x] hospitalizations
+                                      :let [p (/ (- 1 death-severity)
+                                                 (- 1 hospitalization-severity))]]
+                                  [d (* x p)]))
+              deaths (apply merge-with +
+                            (for [[d x] will-die]
+                              (kvmap #(+ d %) #(* x %) deaths-distrib)))
+              will-not-die (merge-with - hospitalizations will-die)
+              discharges (apply merge-with +
+                                (for [[d x] will-not-die]
+                                  (kvmap #(+ d %) #(* x %) discharges-distrib)))
+              d-recoveries (apply merge-with +
+                                  (for [[d x] discharges]
+                                    (kvmap #(+ d %) #(* x %) d-recoveries-distrib)))
+              new-transitions (merge-with
+                               #(apply merge-with + %&)
+                               {day {[:susceptible :exposed] exposures}}
+                               (kvmap identity #(hash-map [:exposed :pre-symptomatic] %) pre-symptomatic)
+                               (kvmap identity #(hash-map [:pre-symptomatic :asymptomatic] %) asymptomatic)
+                               (kvmap identity #(hash-map [:asymptomatic :recovered] %) a-recoveries)
+                               (kvmap identity #(hash-map [:pre-symptomatic :ill] %) ill)
+                               (kvmap identity #(hash-map [:ill :hospitalized] %) hospitalizations)
+                               (kvmap identity #(hash-map [:ill :recovered] %) i-recoveries)
+                               (kvmap identity #(hash-map [:hospitalized :dead] %) deaths)
+                               (kvmap identity #(hash-map [:hospitalized :discharged] %) discharges)
+                               (kvmap identity #(hash-map [:discharged :recovered] %) d-recoveries))
+              next-transitions (merge-with #(merge-with + %1 %2) transitions new-transitions)
+              next-compartments (reduce (fn [m [[from to] v]]
+                                          (-> m
+                                              (update from - v)
+                                              (update to + v)))
+                                        compartments
+                                        (get next-transitions day {}))
+              today-counts (apply merge-with +
+                                  {:day 1, (keyword (str "policy-" (count policy-changes) "-day")) 1
+                                   :contagious contagious, :susceptible-rate susceptible-rate}
+                                  (for [[x v] (next-transitions day)
+                                        :let [k (transition=>day x)]
+                                        :when k]
+                                    {k v}))
+              today-totals (merge-with + (get day-totals (dec day) {}) today-counts)
+              next-day-counts (assoc day-counts day today-counts)
+              next-day-totals (assoc day-totals day today-totals)
+              next-policy-changes (if ((first (nth policies (count policy-changes))) day next-day-counts next-day-totals) (conj policy-changes day) policy-changes)]
+          (when (< 0 verbosity) (println day next-compartments))
+          (recur (inc day)
+                 next-transitions
+                 next-compartments
+                 next-policy-changes
+                 next-day-counts
+                 next-day-totals))))))
+
+(defn cartesian-product [xs]
+  (if (empty? xs)
+    [nil]
+    (for [y (first xs)
+          ys (cartesian-product (next xs))]
+      (conj ys y))))
+
+(defn optimize [ranges f scorer]
+  (let [scores&args&outs (pmap #(let [out (apply f %)
+                                      score (scorer out)]
+                                  [score % out])
+                               (cartesian-product ranges))]
+    (first (sort-by first scores&args&outs))))
+
+(defn optimize2 [guesses f scorer]
+  (loop [guesses guesses
+         obs ]))
