@@ -7,6 +7,7 @@
             [incanter.svg :as isvg]
             [incanter.pdf :as ipdf]
             [clojure.set :as set])
+  (:use [covid.util])
   (:import [java.awt Color]))
 
 (declare atl-hospitalizations avg summarize avg-sims)
@@ -32,18 +33,6 @@
 (def chi-isolation-severity 0.3)
 (def chi-hospitalization-severity 0.96)
 (def chi-death-severity 0.8694)
-
-;; kvmap transforms a map by applying kf to each key and vf to each value
-;; kf should be one-to-one or the output is undefined
-(defn kvmap [kf vf m]
-  (into {} (for [[k v] m]
-             [(kf k) (vf v)])))
-
-;; normalize takes a map of keys to relative proprotions and returns a map
-;; of keys to probabilities, suitable for use with draw
-(defn normalize [m]
-  (let [s (reduce + (vals m))]
-    (kvmap identity #(/ %1 s) m)))
 
 ;; Racial groups used within this simulation.
 (def races #{:white :black :amerindian :asian :polynesian :other})
@@ -392,7 +381,7 @@
                                           ;; to be exposed based upon the transmission rate for the location.
                                           :when (and (< day (get-in actors [actor-id :contract-day] 1e6)))]
                                       (let [severity (:severity (actors actor-id))  ;; based upon age
-                                            onset (int (+ 2 (* 13 (id/draw (id/beta-distribution 3 10)))))  ;; [2, 14] days of incubation, mean of 5
+                                            onset (int (+ 2 (* 13 (id/draw (id/beta-distribution 4 10)))))  ;; [2, 14] days of incubation, mean of 5
                                             hospitalization (if (< hospitalization-severity severity) (+ onset 2 (int (* 13 (id/draw (id/beta-distribution 2 3))))))
                                             death (if (> severity death-severity) (+ hospitalization (int (+ 1.5 (* 10 (id/draw (id/beta-distribution 1 2)))))))
                                             discharge (if (and hospitalization (nil? death)) (+ hospitalization (int (+ 1.5 (* 10 (id/draw (id/beta-distribution 1 2)))))))
@@ -608,8 +597,9 @@
     (ic/set-stroke :width 5 :dataset 1)
     (ic/add-points [] [] :series-label "Observed Hospitalizations")))
 
-(defn plot-sim [[actors data _ policy-change-days]]
+(defn plot-sim [[actors data _ policy-change-days] & [offset]]
   (let [p (ic/xy-plot)
+        offset (or offset 0)
         max-days (inc (apply max (keys data)))
         sorted-data (sort data)
         totals (into {} (for [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
@@ -622,18 +612,19 @@
                            (map #(- %1 %2)
                                 (map #(get-in data [% :hospitalizations] 0) (range max-days))
                                 (map #(+ (get-in data [% :discharges] 0)
-                                         (get-in data [% :deaths] 0)) (range max-days))))]
+                                         (get-in data [% :deaths] 0)) (range max-days))))
+        days (range (- offset) (- max-days offset))]
     (ic/set-stroke p :width 3)
     ;; Add the cumulative lines
     (doseq [lbl [:contractions :illnesses :recoveries :deaths :hospitalizations]]
-      (ic/add-lines p (range max-days) (lbl totals)))
+      (ic/add-lines p days (lbl totals)))
     ;; Add the healthy line
     ;(ic/add-lines p (range max-days) (map #(apply - (count actors) 0 (map (fn [a] (get-in data [a :contractions] 0)) (range %1))) (range max-days)))
     (ic/add-lines p [] [])
     ;; Add the transmissive cases
-    (ic/add-lines p (range max-days) contagious)
+    (ic/add-lines p days contagious)
     ;; Add the hospital load
-    (ic/add-lines p (range max-days) hospitalizations)
+    (ic/add-lines p days hospitalizations)
     (doseq [[ds c] (map vector (range 1 9) [Color/orange Color/red Color/green Color/black Color/cyan Color/pink Color/magenta Color/blue])]
       (ic/set-stroke-color p c :dataset ds)
       (ic/set-stroke p :width 3 :dataset ds))
@@ -642,6 +633,7 @@
       ;(ic/set-stroke-color p c :dataset ds)
       ;(ic/set-stroke p :width 1 :dataset ds)
       )
+    (.addLegend p (org.jfree.chart.title.LegendTitle. (.getPlot (plot-legend))))
     (i/view p)
     p))
 
@@ -1029,8 +1021,10 @@
 
 ;; death data for Chicago, IL.
 ;;      March     22  23 24 25  26  27  28  29  30  31
-;;                                               April  1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22
-(def chi-deaths [nil nil 4  5 nil nil  15  15 nil  26 nil  43 nil nil nil  98 118 177 196 196 212 258 277 308 347 386 420 488 500 538 593 627])
+;;                                               April  1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25  26  27  28  29  30
+;;                                                            May   1   2    3    4    5
+(def chi-deaths [  2   4  5  5   9  12  15  15  16  26 40  43  60  82  98 118 140 177 196 212 258 277 308 347 386 420 461 488 500 538 593 627 661 697 733 761 773 826 873 932 962 987 1014])
+(def chi-deaths-range (range (count chi-deaths)))
 
 ;; death data for Barcelona, Spain; March 1 - April 29
 (def bar-deaths [0 1 1 2 2 2 2 2 3 4 7 11 20 35 41 58 75 114 164 229 304 391 497 614 759 906 1070 1234 1393 1585 1755 1922 2081 2229 2378 2510 2652 2777 2922 3052 3181 3314 3431 3533 3636 3744 3855 3965 4059 4157 4229 4320 4390 4457 4517 4571 4610 4619 4871 4892])
@@ -1049,7 +1043,7 @@
   (try
     (let [hs (map #(get-in totals [(+ offset %) kw] 0) actuals-range)]
       (Math/sqrt (/ (reduce + (map #(* % %) (map - actuals hs))) (count actuals))))
-    #_(catch Exception e nil)))
+    (catch Exception e Double/POSITIVE_INFINITY)))
 
 (defn least-score [sim offset width kw actuals actuals-range]
   (apply min (for [o (range (- offset width) (+ offset width 1))]
@@ -1064,6 +1058,18 @@
 (defn least-score2 [sim offset width kw actuals]
   (apply min (for [o (range (- offset width) (+ offset width 1))]
                (score2 sim o kw actuals))))
+
+(defn score3 [[_ counts] offset actuals actuals-range]
+  (reduce + (for [[day deaths] (map vector actuals-range actuals)
+                  :let [size (max 1 (get-in counts [(+ day offset) :samples] 1))
+                        prob (* 0.001 (get-in counts [(+ day offset) :transmission-rate] 1e-10))]]
+              (- (Math/log (is/pdf-binomial (min size (int deaths))
+                                            :size size 
+                                            :prob prob))))))
+
+(defn least-score3 [sim offset width actuals actuals-range]
+  (apply min (for [o (range (- offset width) (+ offset width 1))]
+               (score3 sim o actuals actuals-range))))
 
 (defn avg-sims [sims & [alignment]]
   (let [alignment (or alignment (repeat nil))
@@ -1180,7 +1186,7 @@
                         0
                         (min (compartments :susceptible)
                              (safe-binomial samples transmission-rate)))
-            incubations (distribute exposures (id/beta-distribution 3 10) (+ day 2) (+ day 14))
+            incubations (distribute exposures (id/beta-distribution 4 10) (+ day 2) (+ day 14))
             pre-symptomatic (kvmap #(- % 2) identity incubations)
             asymptomatic (into {} (for [[d x] incubations]
                                     [d (safe-binomial x isolation-severity)]))
@@ -1261,7 +1267,8 @@
             [0 n {}] icdf)))
 
 (defn run-simulation3 [actor-count n policies & {:keys [verbosity isolation-severity hospitalization-severity death-severity day-limit] :or {verbosity 0, isolation-severity isolation-severity, hospitalization-severity hospitalization-severity, death-severity death-severity, day-limit 500}}]
-  (let [incubations-distrib (fixed-distribute 1 (id/beta-distribution 3 10) 2 14)
+  (let [incubations-distrib (fixed-distribute 1 (id/beta-distribution 4 10) 2 14)
+        non-contagious-distrib (fixed-distribute 1 (id/beta-distribution 3 8) 3 7)
         a-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 4 4) 7 14)
         hospitalizations-distrib (fixed-distribute 1 (id/beta-distribution 2 3) 2 14)
         i-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 4 7) 7 35)
@@ -1269,12 +1276,18 @@
         discharges-distrib (fixed-distribute 1 (id/beta-distribution 3 3) 4 24)
         d-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 3 6) 1 7)]
     (loop [day 1
-           transitions {0 {[:susceptible :exposed] n}, 3 {[:exposed :pre-symptomatic] n} 5, {[:pre-symptomatic :ill] n}, 20 {[:ill :recovered] n}}
-           compartments {:susceptible (- actor-count n), :exposed n, :pre-symptomatic 0, :asymptomatic 0, :ill 0, :hospitalized 0, :discharged 0, :recovered 0, :dead 0}
+           transitions {0 {[:susceptible :exposed] n},
+                        3 {[:exposed :pre-symptomatic] n, [:non-contagious :contagious] n},
+                        5 {[:pre-symptomatic :ill] n},
+                        8 {[:contagious :non-contagious] n},
+                        20 {[:ill :recovered] n}}
+           compartments {:susceptible (- actor-count n), :exposed n, :pre-symptomatic 0,
+                         :asymptomatic 0, :ill 0, :hospitalized 0, :discharged 0,
+                         :recovered 0, :dead 0, :contagious 0, :non-contagious actor-count}
            policy-changes []
            day-counts {0 {:contractions n}}
            day-totals {0 {:contractions n}}]
-      (if (or (< day-limit day) (every? #(> 1 (compartments %)) [:exposed :pre-symptomatic :asymptomatic :ill :hospitalized :discharged]))
+      (if (or (< day-limit day) (every? #(> 1 %) (map compartments [:exposed :pre-symptomatic :asymptomatic :ill :hospitalized :discharged])))
         (let [contagious-portion (/ (get-in day-totals [(dec day) :illnesses])
                                     (get-in day-totals [(dec day) :contagious]))
               day-counts (reduce #(assoc-in %1 [%2 :r] (/ (get-in day-counts [%2 :contractions] 0.0)
@@ -1287,7 +1300,7 @@
                                                            (max 1e-10 (get-in day-counts [%2 :susceptible-rate] 1e-10))))
                                  day-counts (filter #(not= 0 %) (keys day-counts)))]
           [nil day-counts day-totals policy-changes compartments transitions])
-        (let [contagious (+ (compartments :pre-symptomatic) (compartments :asymptomatic) (int (* 1/4 (compartments :ill))))
+        (let [contagious (compartments :contagious) #_(+ (compartments :pre-symptomatic) (compartments :asymptomatic) #_(int (* 1/4 (compartments :ill))))
               susceptible-rate (/ (compartments :susceptible) actor-count)
               transmission-rate (second (nth policies (count policy-changes)))
               samples (int (* interaction-count 4 contagious susceptible-rate))
@@ -1297,6 +1310,9 @@
                                (* samples transmission-rate)))
               incubations (kvmap #(+ day %) #(* exposures %) incubations-distrib)
               pre-symptomatic (kvmap #(- % 2) identity incubations)
+              non-contagious (apply merge-with +
+                                    (for [[d x] pre-symptomatic]
+                                      (kvmap #(+ d %) #(* x %) non-contagious-distrib)))
               asymptomatic (into {} (for [[d x] incubations]
                                       [d (* x isolation-severity)]))
               a-recoveries (apply merge-with +
@@ -1332,6 +1348,8 @@
                                #(apply merge-with + %&)
                                {day {[:susceptible :exposed] exposures}}
                                (kvmap identity #(hash-map [:exposed :pre-symptomatic] %) pre-symptomatic)
+                               (kvmap identity #(hash-map [:non-contagious :contagious] %) pre-symptomatic)
+                               (kvmap identity #(hash-map [:contagious :non-contagious] %) non-contagious)
                                (kvmap identity #(hash-map [:pre-symptomatic :asymptomatic] %) asymptomatic)
                                (kvmap identity #(hash-map [:asymptomatic :recovered] %) a-recoveries)
                                (kvmap identity #(hash-map [:pre-symptomatic :ill] %) ill)
@@ -1349,12 +1367,135 @@
                                         (get next-transitions day {}))
               today-counts (apply merge-with +
                                   {:day 1, (keyword (str "policy-" (count policy-changes) "-day")) 1
-                                   :contagious contagious, :susceptible-rate susceptible-rate}
+                                   :contagious contagious, :susceptible-rate susceptible-rate,
+                                   :transmission-rate transmission-rate, :samples samples,
+                                   :deaths-source (reduce + (vals deaths))}
                                   (for [[x v] (next-transitions day)
                                         :let [k (transition=>day x)]
                                         :when k]
                                     {k v}))
               today-totals (merge-with + (get day-totals (dec day) {}) today-counts)
+              next-day-counts (assoc day-counts day today-counts)
+              next-day-totals (assoc day-totals day today-totals)
+              next-policy-changes (if ((first (nth policies (count policy-changes))) day next-day-counts next-day-totals) (conj policy-changes day) policy-changes)]
+          (when (< 0 verbosity) (println day next-compartments))
+          (recur (inc day)
+                 next-transitions
+                 next-compartments
+                 next-policy-changes
+                 next-day-counts
+                 next-day-totals))))))
+
+(defn run-simulation4 [actor-count n policies & {:keys [verbosity isolation-severity hospitalization-severity death-severity day-limit] :or {verbosity 0, isolation-severity isolation-severity, hospitalization-severity hospitalization-severity, death-severity death-severity, day-limit 500}}]
+  (let [incubations-distrib (fixed-distribute 1 (id/beta-distribution 4 10) 2 14)
+        non-contagious-distrib (fixed-distribute 1 (id/beta-distribution 3 8) 3 7)
+        a-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 4 4) 7 14)
+        hospitalizations-distrib (fixed-distribute 1 (id/beta-distribution 2 3) 2 14)
+        i-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 4 7) 7 35)
+        deaths-distrib (fixed-distribute 1 (id/beta-distribution 1 2) 1 11)
+        discharges-distrib (fixed-distribute 1 (id/beta-distribution 3 3) 4 24)
+        d-recoveries-distrib (fixed-distribute 1 (id/beta-distribution 3 6) 1 7)
+        z-val (nmap (partial * 0) actor-count)]
+    (loop [day 1
+           transitions {0 {[:susceptible :exposed] n},
+                        3 {[:exposed :pre-symptomatic] n, [:non-contagious :contagious] n},
+                        5 {[:pre-symptomatic :ill] n},
+                        8 {[:contagious :non-contagious] n},
+                        20 {[:ill :recovered] n}}
+           compartments {:susceptible (nmap + actor-count (nmap (partial - 0) n)), :exposed n, :pre-symptomatic z-val,
+                         :asymptomatic z-val, :ill z-val, :hospitalized z-val, :discharged z-val,
+                         :recovered z-val, :dead z-val, :contagious z-val, :non-contagious actor-count}
+           policy-changes []
+           day-counts {0 {:contractions n}}
+           day-totals {0 {:contractions n}}]
+      (if (or (< day-limit day) (nreduce #(and %1 %2) #(> 1 %) (select-keys compartments [:exposed :pre-symptomatic :asymptomatic :ill :hospitalized :discharged])))
+        (let [contagious-portion (/ (nreduce + + (get-in day-totals [(dec day) :illnesses]))
+                                    (nreduce + + (get-in day-totals [(dec day) :contagious])))
+              day-counts (reduce #(assoc-in %1 [%2 :r] (/ (nreduce + + (get-in day-counts [%2 :contractions] 0.0))
+                                                          (max 1 (nreduce + + (get-in day-counts [%2 :contagious] 1.0)))
+                                                          contagious-portion))
+                                 day-counts (filter #(not= 0 %) (keys day-counts)))
+              day-counts (reduce #(assoc-in %1 [%2 :r0] (/ (nreduce + + (get-in day-counts [%2 :contractions] 0.0))
+                                                           (max 1 (nreduce + + (get-in day-counts [%2 :contagious] 1.0)))
+                                                           contagious-portion
+                                                           (max 1e-10 (nreduce + + (get-in day-counts [%2 :susceptible-rate] 1e-10)))))
+                                 day-counts (filter #(not= 0 %) (keys day-counts)))]
+          [nil day-counts day-totals policy-changes compartments transitions])
+        (let [spread-rate (nth (nth policies (count policy-changes)) 2)
+              contagious (nreduce + + (nmap * (compartments :contagious) spread-rate))
+              susceptible-rate (nmap #(/ % (nreduce + + actor-count)) (compartments :susceptible))
+              transmission-rate (second (nth policies (count policy-changes)))
+              samples (nmap (comp int (partial * interaction-count 4 contagious)) susceptible-rate)
+              exposures (nmap (fn ([] 0) ([x y] (min x y)))
+                              (compartments :susceptible)
+                              (nmap * samples transmission-rate))
+              incubations (kvmap #(+ day %) #(nmap (partial * %) exposures) incubations-distrib)
+              pre-symptomatic (kvmap #(- % 2) identity incubations)
+              non-contagious (apply nmap +
+                                    (for [[d x] pre-symptomatic]
+                                      (kvmap #(+ d %) #(nmap (partial * %) x) non-contagious-distrib)))
+              asymptomatic (into {} (for [[d x] incubations]
+                                      [d (nmap * isolation-severity x)]))
+              a-recoveries (apply nmap +
+                                  (for [[d x] asymptomatic]
+                                    (kvmap #(+ d %) #(nmap (partial * %) x) a-recoveries-distrib)))
+              ill (merge-with (partial nmap +) incubations (nmap (partial - 0) asymptomatic))
+              will-hospitalize (into {} (for [[d x] ill
+                                              :let [p (nmap #(/ (- 1 %1) (- 1 %2))
+                                                            hospitalization-severity
+                                                            isolation-severity)]]
+                                          [d (nmap * p x)]))
+              hospitalizations (apply nmap +
+                                      (for [[d x] will-hospitalize]
+                                        (kvmap #(+ d %) #(nmap (partial * %) x) hospitalizations-distrib)))
+              will-not-hospitalize (merge-with (partial nmap +) ill (nmap (partial - 0) will-hospitalize))
+              i-recoveries (apply nmap +
+                                  (for [[d x] will-not-hospitalize]
+                                    (kvmap #(+ d %) #(nmap (partial * %) x) i-recoveries-distrib)))
+              will-die (into {} (for [[d x] hospitalizations
+                                      :let [p (nmap #(/ (- 1 %1) (- 1 %2))
+                                                    death-severity
+                                                    hospitalization-severity)]]
+                                  [d (nmap * p x)]))
+              deaths (apply nmap +
+                            (for [[d x] will-die]
+                              (kvmap #(+ d %) #(nmap (partial * %) x) deaths-distrib)))
+              will-not-die (merge-with (partial nmap +) hospitalizations (nmap (partial - 0) will-die))
+              discharges (apply nmap +
+                                (for [[d x] will-not-die]
+                                  (kvmap #(+ d %) #(nmap (partial * %) x) discharges-distrib)))
+              d-recoveries (apply nmap +
+                                  (for [[d x] discharges]
+                                    (kvmap #(+ d %) #(nmap (partial * %) x) d-recoveries-distrib)))
+              new-transitions (merge-with
+                               #(apply nmap + %&)
+                               {day {[:susceptible :exposed] exposures}}
+                               (kvmap identity #(hash-map [:exposed :pre-symptomatic] %) pre-symptomatic)
+                               (kvmap identity #(hash-map [:non-contagious :contagious] %) pre-symptomatic)
+                               (kvmap identity #(hash-map [:contagious :non-contagious] %) non-contagious)
+                               (kvmap identity #(hash-map [:pre-symptomatic :asymptomatic] %) asymptomatic)
+                               (kvmap identity #(hash-map [:asymptomatic :recovered] %) a-recoveries)
+                               (kvmap identity #(hash-map [:pre-symptomatic :ill] %) ill)
+                               (kvmap identity #(hash-map [:ill :hospitalized] %) hospitalizations)
+                               (kvmap identity #(hash-map [:ill :recovered] %) i-recoveries)
+                               (kvmap identity #(hash-map [:hospitalized :dead] %) deaths)
+                               (kvmap identity #(hash-map [:hospitalized :discharged] %) discharges)
+                               (kvmap identity #(hash-map [:discharged :recovered] %) d-recoveries))
+              next-transitions (merge-with #(nmap + %1 %2) transitions new-transitions)
+              next-compartments (reduce (fn [m [[from to] v]]
+                                          (-> m
+                                              (update from (partial nmap +) (nmap (partial - 0) v))
+                                              (update to (partial nmap +) v)))
+                                        compartments
+                                        (get next-transitions day {}))
+              today-counts (apply merge-with (partial nmap +)
+                                  {:day 1, (keyword (str "policy-" (count policy-changes) "-day")) 1
+                                   :contagious contagious, :susceptible-rate susceptible-rate}
+                                  (for [[x v] (next-transitions day)
+                                        :let [k (transition=>day x)]
+                                        :when k]
+                                    {k v}))
+              today-totals (merge-with (partial nmap +) (get day-totals (dec day) {}) today-counts)
               next-day-counts (assoc day-counts day today-counts)
               next-day-totals (assoc day-totals day today-totals)
               next-policy-changes (if ((first (nth policies (count policy-changes))) day next-day-counts next-day-totals) (conj policy-changes day) policy-changes)]
@@ -1380,6 +1521,58 @@
                                (cartesian-product ranges))]
     (first (sort-by first scores&args&outs))))
 
-(defn optimize2 [guesses f scorer]
-  (loop [guesses guesses
-         obs ]))
+(defn pick-from-range [[low high step] spread & [current]]
+  (let [width (- high low)
+        current (or current (/ (+ low high) 2))
+        alpha (/ (- current low) width spread)
+        beta (- (/ spread) alpha)
+        p (id/draw (id/beta-distribution (inc alpha) (inc beta)))]
+    (* step (int (+ 0.5 (* (/ step) (+ low (* width p))))))))
+
+(defn optimize2 [ranges f scorer num-steps batch & [initial-guess]]
+  (let [guess (or initial-guess (map #(pick-from-range % 1) ranges))
+        sim (apply f guess)
+        score (scorer sim)]
+    (loop [steps num-steps
+           obs {guess [sim score]}]
+      (if (zero? steps)
+        (sort-by #(second (second %)) obs)
+        (let [choice (draw (normalize (kvmap identity #(/ (* (second %) (second %))) obs)))
+              guess (map #(pick-from-range %1 (Math/pow 0.5 (/ (- num-steps steps) batch)) %2) ranges choice)
+              sim (apply f guess)
+              score (scorer sim)
+              _ (println score steps guess)
+              obs (assoc obs guess [sim score])
+              best-obs (into {} (take batch (sort-by #(second (second %)) obs)))]
+          (recur (dec steps) best-obs))))))
+
+(defn optimize3 [ranges f scorer num-steps batch & [initial-guess]]
+  (let [guess (or initial-guess (map #(pick-from-range % 1) ranges))
+        sim (apply f guess)
+        score (scorer sim)]
+    (loop [steps num-steps
+           obs {guess [sim score]}]
+      (if (zero? steps)
+        (sort-by #(second (second %)) obs)
+        (let [choice (draw (normalize (kvmap identity #(/ (* (second %) (second %))) obs)))
+              guess (map #(pick-from-range %1 (Math/pow 0.5 (/ (- num-steps steps) batch)) %2) ranges choice)
+              sim (apply f guess)
+              score (scorer sim)
+              _ (println score steps)
+              _ (println guess)
+              _ (println (first (first obs)))
+              obs (assoc obs guess [sim score])
+              best-obs (into {} (take 1 (sort-by #(second (second %)) obs)))]
+          (recur (dec steps) best-obs))))))
+
+(def inv-death-distrib
+  (let [incubations-distrib (fixed-distribute 1 (id/beta-distribution 4 10) 2 14)
+        hospitalizations-distrib (fixed-distribute 1 (id/beta-distribution 2 3) 2 14)
+        deaths-distrib (fixed-distribute 1 (id/beta-distribution 1 2) 1 11)
+        ihd-distrib (apply merge-with +
+                           (for [[d1 p1] incubations-distrib
+                                 [d2 p2] hospitalizations-distrib
+                                 [d3 p3] deaths-distrib]
+                             {(+ d1 d2 d3) (* p1 p2 p3)}))]
+    (kvmap #(- %) identity ihd-distrib)))
+
