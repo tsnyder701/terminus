@@ -42,6 +42,24 @@
 ;; of keys to probabilities, suitable for use with draw
 (defn normalize [m]
   (let [s (reduce + (vals m))]
-    (kvmap identity #(/ %1 s) m)))
+    (if (zero? s)
+      (kvmap identity (constantly (/ (count m))) m)
+      (kvmap identity #(/ %1 s) m))))
 
+(defn avg
+  ([x] (/ (reduce + 0.0 x) (float (count x))))
+  ([x y] (let [x&y (filter (fn [[x y]] (and x y)) (map vector x y))
+               top (reduce + 0.0 (map (partial apply *) x&y))
+               bottom (reduce #(+ %1 (second %2)) 0.0 x&y)]
+           (if (zero? bottom)
+             (if (zero? top)
+               ##NaN
+               (if (pos? top) ##Inf (- ##Inf)))
+             (/ top bottom)))))
 
+(defn diffs [aggs & [steps]]
+  (let [steps (or steps 1)])
+  (into (sorted-map)
+        (map vector
+             (drop (int (/ (inc steps) 2)) (keys aggs))
+             (map #(/ (- %1 %2) steps) (drop steps (vals aggs)) (vals aggs)))))

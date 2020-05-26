@@ -6,7 +6,8 @@
             [incanter.stats :as is]
             [incanter.svg :as isvg]
             [incanter.pdf :as ipdf]
-            [clojure.set :as set])
+            [clojure.set :as set]
+            [covid.data :as d])
   (:use [covid.util])
   (:import [java.awt Color]))
 
@@ -1034,11 +1035,6 @@
 (def greece-deaths [1 1 3 4 4 5 5 6 10 13 15 17 20 22 26 28 32 38 43 49 50 53 59 68 73 79 81 83 86 90 93 98 99 101 102 105 108 110 113 116 121 121 125 130 130 134 136 138 139 140 140])
 (def greece-deaths-range (range -4 (+ -4 (count greece-deaths))))
 
-(defn avg
-  ([x] (/ (reduce + 0.0 x) (float (count x))))
-  ([x y] (let [x&y (filter (fn [[x y]] (and x y)) (map vector x y))]
-                     (/ (reduce + 0.0 (map (partial apply *) x&y)) (reduce #(+ %1 (second %2)) 0.0 x&y)))))
-
 (defn score [[_ _ totals pc] offset kw actuals actuals-range]
   (try
     (let [hs (map #(get-in totals [(+ offset %) kw] 0) actuals-range)]
@@ -1059,17 +1055,31 @@
   (apply min (for [o (range (- offset width) (+ offset width 1))]
                (score2 sim o kw actuals))))
 
-(defn score3 [[_ counts] offset actuals actuals-range]
+(defn score3 [[_ counts] offset death-rate actuals actuals-range]
   (reduce + (for [[day deaths] (map vector actuals-range actuals)
                   :let [size (max 1 (get-in counts [(+ day offset) :samples] 1))
-                        prob (* 0.001 (get-in counts [(+ day offset) :transmission-rate] 1e-10))]]
+                        prob (* death-rate (get-in counts [(+ day offset) :transmission-rate] 1e-10))]]
               (- (Math/log (is/pdf-binomial (min size (int deaths))
                                             :size size 
                                             :prob prob))))))
 
-(defn least-score3 [sim offset width actuals actuals-range]
-  (apply min (for [o (range (- offset width) (+ offset width 1))]
-               (score3 sim o actuals actuals-range))))
+(defn least-score3 [sim offset width death-rate actuals actuals-range]
+  (first (sort (for [o (range (- offset width) (+ offset width 1))]
+                 [(score3 sim o death-rate actuals actuals-range) o]))))
+
+(defn score4 [[_ counts] offset death-rate actuals-map]
+  (reduce + (for [[day deaths] actuals-map
+                  :let [sim-deaths (get-in counts [(+ day offset) :deaths] 0)
+                        p (is/pdf-poisson deaths :lambda sim-deaths)]
+                  :when (not (Double/isNaN p))]
+              (- (Math/log p)))))
+
+(defn score4d [[_ counts] offset death-rate actuals-map]
+  (for [[day deaths] actuals-map
+        :let [sim-deaths (get-in counts [(+ day offset) :deaths] 0)
+              p (is/pdf-poisson deaths :lambda sim-deaths)]
+        :when (not (Double/isNaN p))]
+    p))
 
 (defn avg-sims [sims & [alignment]]
   (let [alignment (or alignment (repeat nil))
@@ -1526,6 +1536,7 @@
         current (or current (/ (+ low high) 2))
         alpha (/ (- current low) width spread)
         beta (- (/ spread) alpha)
+        _ (if (or (neg? alpha) (neg? beta)) (println "Negative!" alpha beta current width low high step spread))
         p (id/draw (id/beta-distribution (inc alpha) (inc beta)))]
     (* step (int (+ 0.5 (* (/ step) (+ low (* width p))))))))
 
@@ -1556,13 +1567,11 @@
         (sort-by #(second (second %)) obs)
         (let [choice (draw (normalize (kvmap identity #(/ (* (second %) (second %))) obs)))
               guess (map #(pick-from-range %1 (Math/pow 0.5 (/ (- num-steps steps) batch)) %2) ranges choice)
-              sim (apply f guess)
-              score (scorer sim)
-              _ (println score steps)
-              _ (println guess)
-              _ (println (first (first obs)))
+              [sim score] (if-let [sim-score (obs guess)]
+                            sim-score
+                            (#(vector % (scorer %)) (apply f guess)))
               obs (assoc obs guess [sim score])
-              best-obs (into {} (take 1 (sort-by #(second (second %)) obs)))]
+              best-obs (into {} (take batch (sort-by #(second (second %)) obs)))]
           (recur (dec steps) best-obs))))))
 
 (def inv-death-distrib
@@ -1576,3 +1585,247 @@
                              {(+ d1 d2 d3) (* p1 p2 p3)}))]
     (kvmap #(- %) identity ihd-distrib)))
 
+(defn deaths-source [deaths]
+  (let [max-day (apply max (keys deaths))
+        sorted-deaths (into (sorted-map) deaths)
+        days (drop 1 (keys sorted-deaths))
+        deltas (map - (drop 1 (vals sorted-deaths)) (vals sorted-deaths))
+        daily-deaths (map vector days deltas)]
+    (into (sorted-map) (filter #(<= (key %) (- max-day 28))
+                               (apply merge-with +
+                                      (for [[day deaths] daily-deaths]
+                                        (kvmap #(+ % day) #(* % deaths) inv-death-distrib)))))))
+
+(def inv-cases-distrib
+  (let [incubations-distrib (fixed-distribute 1 (id/beta-distribution 4 10) 2 14)]
+    (kvmap #(- %) identity incubations-distrib)))
+
+(defn cases-source [cases]
+  (let [max-day (apply max (keys cases))
+        sorted-cases (into (sorted-map) cases)
+        days (drop 1 (keys sorted-cases))
+        deltas (map - (drop 1 (vals sorted-cases)) (vals sorted-cases))
+        daily-cases (map vector days deltas)]
+    (into (sorted-map) (filter #(<= (key %) (- max-day 4))
+                               (apply merge-with +
+                                      (for [[day cases] daily-cases]
+                                        (kvmap #(+ % day) #(* % cases) inv-cases-distrib)))))))
+
+(defn divide-range [[low high step]]
+  (let [width (- high low)]
+    (* step (int (+ 0.5 (/ (+ low (* width 1/2)) step))))))
+
+(defn subdivide [ranges]
+  (if (empty? ranges)
+    [nil]
+    (let [mid (divide-range (first ranges))
+          [low high step] (first ranges)]
+      (for [[l h] [[low mid] [mid high]]
+            :when (not= l h)
+            subranges (subdivide (rest ranges))]
+        (conj subranges [l h step])))))
+
+(defn volume [ranges]
+  (reduce * (map #(- (second %) (first %)) (map sort ranges))))
+
+(defn sample-space [ranges f scorer n]
+  (let [mid (map divide-range ranges)
+        result (apply f mid)
+        score (scorer result)
+        weight (volume ranges)]
+    (loop [samples [[score weight mid ranges result]]
+           complete []]
+      (cond
+        (>= (+ (count complete) (count samples)) n)
+        (sort-by #(- (first %) (second %)) (concat complete samples))
+
+        (zero? (count samples)) (sort-by #(- (first %) (second %)) complete)
+
+        :default
+        (let [sample (first samples)
+              divs (subdivide (sample 3))
+              [new-samples complete]
+              (if (= 1 (count divs))
+                [[] (conj complete sample)]
+                [(pmap (fn [div] (let [mid (map divide-range div)
+                                       result (apply f mid)
+                                       score (scorer result)
+                                       weight (Math/log (volume div))]
+                                   [score weight mid div result]))
+                       divs)
+                 complete])
+              samples (apply conj (next samples) new-samples)
+              sorted-samples (sort-by #(- (first %) (second %)) samples)]
+          #_(println (first (first sorted-samples))
+                   (- (first (first sorted-samples)) (second (first sorted-samples)))
+                   (second (first sorted-samples)))
+          (recur sorted-samples complete))))))
+
+(defn within-ranges [ranges vs]
+  (every? (fn [[[low high] v]] (<= low v high)) (map vector ranges vs)))
+
+(defn model-state [deaths pop ranges policy offset & {:keys [sample-count best-guess best-samples best-kept initial-cases isolation-severity hospitalization-severity death-severity day-limit] :or {sample-count 500, best-samples 300, best-kept 15, initial-cases 1, isolation-severity 0.45, hospitalization-severity (- 1 (* 4 0.005)), death-severity (- 1 0.005), day-limit 200}}]
+  (let [daily-deaths (into (sorted-map) (map vector (drop 3 (keys deaths))
+                                             (map #(/ (- %1 %2) 7) (drop 7 (vals deaths)) (vals deaths))))
+        _ (println "calling optimize3 with" ranges best-samples best-kept)
+        best (optimize3
+              ranges
+              (fn [& args] (conj (run-simulation3 pop initial-cases (apply policy args)
+                                                  :death-severity death-severity
+                                                  :hospitalization-severity hospitalization-severity
+                                                  :isolation-severity isolation-severity
+                                                  :day-limit day-limit)
+                                 args))
+              #(/ (score4 % (offset %) death-severity daily-deaths) 7)
+              best-samples best-kept)
+        best-args (first (first best))
+        _ (println "calculating best range from" best-args)
+        best-ranges (mapv (fn [ba [rl rh rs]]
+                            (let [l (max (* 0.9 ba) rl)
+                                  h (min (* 1.1 ba) rh)
+                                  s (max (/ (- h l) 32) rs)]
+                              (if (= 1 s)
+                                [(int (Math/floor l)) (int (Math/ceil h)) 1]
+                                [l h s])))
+                          best-args ranges)
+        _ (println "calling sample-space with" best-ranges)
+        samples (sample-space
+                 best-ranges
+                 (fn [& args]
+                   (conj (run-simulation3 pop initial-cases (apply policy args)
+                                          :death-severity death-severity
+                                          :hospitalization-severity hospitalization-severity
+                                          :isolation-severity isolation-severity
+                                          :day-limit day-limit)
+                         args))
+                 #(/ (score4 % (offset %) death-severity daily-deaths) 7)
+                 sample-count)
+        weighted-sum (reduce (fn [a b] (+ a (Math/log1p (Math/exp (- b a))))) (map #(- (second %) (first %)) samples))]
+    (println "weighted-sum" weighted-sum)
+    (map (fn [[score measure args ranges sim]]
+           {:score score, :measure measure, :value (- score measure), :percentage (Math/exp (- measure score weighted-sum)), :args args, :ranges ranges, :sim sim})
+         samples)))
+
+(defn sum-distribs [weighted-distribs]
+  (apply merge-with +
+         (for [[w d] weighted-distribs
+               :let [m (id/mean d)
+                     pm (id/pdf d m)]]
+           (merge
+            (into (sorted-map)
+                  (for [x (range (dec m) -1 -1)
+                        :let [px (id/pdf d x)]
+                        :while (< 0.001 (/ px pm))]
+                    [x (* px w)]))
+            (into (sorted-map)
+                  (for [x (range m (* m 10))
+                        :let [px (id/pdf d x)]
+                        :while (< 0.001 (/ px pm))]
+                    [x (* px w)]))))))
+
+(defn calc-day-percentiles [samples offset day sample-percentiles & [deaths]]
+  (if-let [actual-deaths (get deaths day)]
+    (vec (map vector sample-percentiles (repeat (get deaths day 0))))
+    (let [[latest-actual-day latest-actual-deaths] (if deaths (last deaths) [0 0])
+          sorted-samples (sort-by #(get-in % [:sim 2 (+ latest-actual-day (offset (:sim %))) :deaths] 0)
+                                  samples)
+          percentages (map :percentage sorted-samples)
+          values (map #(- (get-in % [:sim 2 (+ day (offset (:sim %))) :deaths] 0)
+                          (get-in % [:sim 2 (+ latest-actual-day (offset (:sim %))) :deaths] 0))
+                      sorted-samples)
+          weighted-distribs (map vector percentages (map id/normal-distribution values (map #(* 9 (Math/sqrt %)) values)))
+          summed-pdf (sum-distribs weighted-distribs)
+          percentile-values (map vector (reductions + (vals summed-pdf)) (keys summed-pdf))]
+      (vec (for [p sample-percentiles]
+             (let [[before after] (partition-by #(< (or (first %) 0) p) (cons [nil nil] percentile-values))
+                   before-weight (if-let [p2 (first (last before))]
+                                   (- p p2)
+                                   0)
+                   after-weight (if-let [p3 (first (first after))]
+                                  (- p3 p)
+                                  0)
+                   m (avg [(or (second (last before)) 0) (or (second (first after)) 0)]
+                          [before-weight after-weight])]
+               [p (+ m latest-actual-deaths)]))))))
+
+(def proj-accum (atom []))
+(defn generate-projections [state-data & {:keys [days-ahead drop-days] :or {days-ahead 48}}]
+  (reset! proj-accum [])
+  (let [sample-percentiles (concat [0.01 0.025] (map float (range 5/100 96/100 5/100)) [0.975 0.99])]
+    (doall
+     (apply
+      concat
+      (pmap
+       (fn [state-map]
+         (doall
+          (for [state-map [state-map]
+                :let [state (:state state-map)
+                      fips (d/state-fips state)
+                      pop (or (:pop state-map) (d/state-pop state))
+                      deaths (apply dissoc (or (:deaths state-map) (d/state-deaths state)) drop-days)
+                      ld-day (:ld-day state-map)
+                      policy-fn (or (:policy-fn state-map) (fn [m0 a0 m1 a1 s2]
+                                                             [[#(<= (get deaths m0 0)
+                                                                    (get-in %3 [%1 :deaths] 0)) a0]
+                                                              [#(<= m1 (get-in %3 [%1 :policy-1-day])) a1]
+                                                              [(constantly false) (* a1 (Math/exp s2))]]))
+                      offset-fn (or (:offset-fn state-map) (fn [sim]
+                                                             (- (first (nth sim 3))
+                                                                (or ld-day (first (last sim))))))
+                      ranges (or (:ranges state-map)
+                                 [(if ld-day [ld-day (+ 0.1 ld-day) 1] [75 100 1])
+                                  [0.01 0.04 0.0001]
+                                  [14 35 1]
+                                  [0.002 0.015 0.00001]
+                                  [-0.2 0.2 0.01]])
+                      _ (println "calling model-state for" state)
+                      samples (try (model-state deaths pop ranges policy-fn offset-fn)
+                                   (catch Exception e nil))
+                      latest-day (first (last deaths))]
+                :when samples
+                day (range (inc latest-day) (+ latest-day days-ahead 1))
+                [quantile value] (calc-day-percentiles samples offset-fn day sample-percentiles deaths)
+                :let [day-data {:country "US"
+                                :state state
+                                :fips fips
+                                :quantile quantile
+                                :value value
+                                :target-day day
+                                :forecast-day (inc latest-day)}]]
+            (do
+              (swap! proj-accum conj day-data)
+              day-data))))
+       state-data)))))
+
+(defn translate-projection [projection ptype target-type]
+  (let [{:keys [country state fips quantile value target-day forecast-day]} projection
+        t ptype]
+    {"country" country
+     "state" (or state "")
+     "location" fips
+     "quantile" (if (= t :quantile) (format "%.03f" (float quantile)) "NA")
+     "forecast_date" (d/date-iso forecast-day)
+     "target" (case target-type
+                :day-cum-death (str (- target-day forecast-day) " day ahead cum death")
+                :week-cum-death (let [week-ahead (if (#{5 6} (mod forecast-day 7))
+                                                   (int (/ (- target-day forecast-day -1) 7))
+                                                   (int (/ (- target-day forecast-day -1) 7)))]
+                                  (str week-ahead " wk ahead cum death")))
+     "target_end_date" (d/date-iso target-day)
+     "value" (str (int value))
+     "type" (name t)}))
+
+(defn prepare-csv [projections dir]
+  (let [p projections
+        forecast-day (:forecast-day (first p))
+        filename (str "\\" (d/date-iso forecast-day) "-SWC-TerminusCM.csv")
+        p2 (for [d p
+                 et (if (= (:quantile d) 0.5)
+                     [:quantile :point]
+                     [:quantile])
+                 tt (if (= (mod (:target-day d) 7) 4)
+                      [:day-cum-death :week-cum-death]
+                      [:day-cum-death])]
+             (translate-projection d et tt))
+        ds (i/dataset p2)]
+    (i/save ds (str dir filename))))
