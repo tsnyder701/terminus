@@ -1688,7 +1688,7 @@
               [sim score] (if-let [sim-score (obs guess)]
                             sim-score
                             (#(vector % (scorer %)) (apply f guess)))
-              #_(println steps score guess)
+              #_ (println steps score guess)
               obs (assoc obs guess [sim score])
               best-obs (into {} (take batch (sort-by #(second (second %)) obs)))]
           (recur (dec steps) best-obs))))))
@@ -1790,36 +1790,56 @@
         _ (if (or (neg? alpha) (neg? beta)) (println "Negative!" alpha beta current width low high step spread))]
     (id/beta-distribution (inc alpha) (inc beta))))
 
+(defn rewind-simulation3 [[_ counts totals policy-changes compartments transitions] day]
+  (let [last-day (apply max (keys counts))]
+    (if (<= last-day day)
+      [_ counts totals policy-changes compartments transitions]
+      (let [counts (apply dissoc counts (range last-day day -1))
+            totals (apply dissoc totals (range last-day day -1))
+            policy-changes (vec (filter #(<= day %) policy-changes))
+            rewind-transitions (apply merge-with + (map transitions (range last-day day -1)))
+            compartments (reduce (fn [m [[from to] v]]
+                                          (-> m
+                                              (update from + v)
+                                              (update to - v)))
+                                 compartments
+                                 rewind-transitions)
+            transitions (apply dissoc transitions (range last-day day -1))]
+        [nil counts totals policy-changes compartments transitions]))))
+
 (defn project-simulation [sim actor-count policies best-args spread scorer & {:keys [sample-count initial-cases isolation-severity hospitalization-severity death-severity day-limit tx-divisions last-day] :or {sample-count 500, initial-cases 1, isolation-severity 0.45, hospitalization-severity (- 1 (* 4 0.005)), death-severity (- 1 0.005), day-limit 200}}]
-  (let [tx-divisions (or tx-divisions (int (Math/sqrt sample-count)))
+  (let [tx-divisions (or tx-divisions (int sample-count))
         last-day (or last-day (count (sim 1)))
+        rewind-day (- last-day 12)
+        rewind-sim (run-simulation3 actor-count initial-cases policies
+                                    :death-severity death-severity
+                                    :hospitalization-severity hospitalization-severity
+                                    :isolation-severity isolation-severity
+                                    :day-limit rewind-day)
         worst-tx-rate (reduce max 0 (map second policies))
-        best-tx-rate (* 0.7 (reduce min worst-tx-rate (map second policies)))
-        last-tx-rate (second (last policies))
+        best-tx-rate (* 0.5 (reduce min worst-tx-rate (map second policies)))
+        last-tx-rate (* 0.8 (second (last policies)))
+        _ (println "last-day:" last-day "tx-divisions:" tx-divisions "best-tx:" best-tx-rate "worst-tx:" worst-tx-rate)
         tx-diff (- worst-tx-rate best-tx-rate)
         tx-step (/ tx-diff tx-divisions)
         policy-fn (fn [& args]
                     (let [tx (last args)]
                       (conj policies
                             [(constantly false) tx])))
+        policy-changes (vec (take (count policies) (concat (rewind-sim 3) (repeat rewind-day))))
+        rewind-sim (assoc rewind-sim 3 policy-changes)
         distrib-fn #(distrib-from-range [best-tx-rate worst-tx-rate tx-step] spread %1)
-        scorer (fn [sim]
-                 (let [tx (last (last sim))
-                       px (Math/log (id/pdf (distrib-fn last-tx-rate) tx))]
-                   #_(println "args:" (last sim) "score:" (scorer sim) "px:" px "py:" py "total:" (- (scorer sim) px py))
-                   (- (scorer sim) px)))
         ranges-fn (fn [vx]
                     (conj (mapv #(vector % (* 1.01 %) (* 0.02 %)) best-args)
                           [(- vx (/ tx-step 2)) (+ vx (/ tx-step 2)) tx-step]))
         value-fn #(+ best-tx-rate (* (+ % (/ 0.5 tx-divisions)) tx-diff))]
     (sort-by #(- (first %) (second %))
      (for [x (range 0 1 (/ tx-divisions))
-           :let [_ (println x)
-                 px (Math/log (- (id/cdf (distrib-fn last-tx-rate) (+ x (/ tx-divisions)))
+           :let [px (Math/log (- (id/cdf (distrib-fn last-tx-rate) (+ x (/ tx-divisions)))
                                  (id/cdf (distrib-fn last-tx-rate) x)))
                  vx (value-fn x)
                  args (concat best-args [vx])
-                 sim (conj (resume-simulation3 sim actor-count (apply policy-fn args)
+                 sim (conj (resume-simulation3 rewind-sim actor-count (apply policy-fn args)
                                                :death-severity death-severity
                                                :hospitalization-severity hospitalization-severity
                                                :isolation-severity isolation-severity
@@ -1878,7 +1898,7 @@
 (defn within-ranges [ranges vs]
   (every? (fn [[[low high] v]] (<= low v high)) (map vector ranges vs)))
 
-(defn model-state [deaths pop ranges policy offset & {:keys [sample-count best-guess best-samples best-kept initial-cases isolation-severity hospitalization-severity death-severity day-limit spread tx-divisions] :or {sample-count 500, best-samples 100, best-kept 5, initial-cases 1, isolation-severity 0.45, hospitalization-severity (- 1 (* 4 0.005)), death-severity (- 1 0.005), day-limit 200, spread 0.5}}]
+(defn model-state [deaths pop ranges policy offset & {:keys [sample-count best-guess best-samples best-kept initial-cases isolation-severity hospitalization-severity death-severity day-limit spread tx-divisions] :or {sample-count 500, best-samples 300, best-kept 15, initial-cases 1, isolation-severity 0.45, hospitalization-severity (- 1 (* 4 0.005)), death-severity (- 1 0.005), day-limit 200, spread 0.05}}]
   (let [daily-deaths (into (sorted-map) (map vector (drop 3 (keys deaths))
                                              (map #(/ (- %1 %2) 7) (drop 7 (vals deaths)) (vals deaths))))
         [last-day _] (last daily-deaths)
@@ -1922,6 +1942,7 @@
                                 [l h s])))
                           best-args ranges)
         scorer #(/ (score4 % (offset %) death-severity daily-deaths) 7)
+        best-offset (offset best-sim)
         _ (println "calling sample-space with" best-ranges)
         samples (project-simulation best-sim pop (short-policy-fn best-args) best-args spread scorer
                                     :sample-count sample-count
@@ -1930,9 +1951,9 @@
                                     :hospitalization-severity hospitalization-severity
                                     :death-severity death-severity
                                     :day-limit day-limit
-                                    :tx-divisions tx-divisions)
+                                    :tx-divisions tx-divisions
+                                    :last-day (+ last-day best-offset))
         _ (println "finished projections")
-        _ (def samples samples)
         #_samples #_(sample-space
                  best-ranges
                  (fn [& args]
@@ -1978,8 +1999,10 @@
           values (map #(- (get-in % [:sim 2 (+ day (offset (:sim %))) :deaths] 0)
                           (get-in % [:sim 2 (+ latest-actual-day (offset (:sim %))) :deaths] 0))
                       sorted-samples)
-          sd (* 30 (Math/sqrt (- day latest-actual-day)))
-          weighted-distribs (map vector percentages (map id/normal-distribution values (repeat sd)))
+          incs (map #(- (get-in % [:sim 2 (+ day (offset (:sim %))) :deaths] 0)
+                        (get-in % [:sim 2 (+ day (offset (:sim %)) -1) :deaths] 0))
+                    sorted-samples)
+          weighted-distribs (map vector percentages (map id/normal-distribution values (map #(* (Math/sqrt %)) incs)))
           summed-pdf (sum-distribs weighted-distribs)
           percentile-values (map vector (reductions + (vals summed-pdf)) (keys summed-pdf))]
       (vec (for [p sample-percentiles]
@@ -2026,10 +2049,11 @@
                                   [0.002 0.015 0.00001]
                                   [-0.2 0.2 0.01]])
                       _ (println "calling model-state for" state)
-                      samples (try (model-state deaths pop ranges policy-fn offset-fn :tx-divisions 100)
+                      samples (try (model-state deaths pop ranges policy-fn offset-fn :tx-divisions 300)
                                    (catch Exception e
-                                     (println "Crashed:" e)))
-                      latest-day (first (last deaths))]
+                                     (println state "Crashed:" e)))
+                      latest-day (first (last deaths))
+                      _ (println "calculating quantiles for" state)]
                 :when samples
                 day (range (inc latest-day) (+ latest-day days-ahead 1))
                 [quantile value] (calc-day-percentiles samples offset-fn day sample-percentiles deaths)

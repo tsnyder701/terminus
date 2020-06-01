@@ -92,15 +92,11 @@
                              [(constantly false) (* 1 a1)]])
                :offset-fn #(- (or (first (nth % 3)) 100) 82)})
 
-(def nj-model {:state "NJ", :ld-day 78, :ranges [[0.035 0.04 0.001]
-                                                 [0.007 0.009 0.0001]
-                                                 [20 30 1]
-                                                 [-0.2 0.2 0.01]]
-               :policy-fn (fn [a0 a1 m0 s2]
-                            [[#(<= 5 (get-in %3 [%1 :deaths] 0)) a0]
-                             [#(<= m0 (get-in %3 [%1 :policy-1-day])) a1]
-                             [(constantly false) (* a1 (Math/exp s2))]])
-               :offset-fn #(- (or (first (nth % 3)) 100) 81)})
+(def nj-model {:state "NJ", :ld-day 78, :ranges [[75 100 1]
+                                                 [0.01 0.06 0.0001]
+                                                 [0 20 1]
+                                                 [0.001 0.018 0.00001]
+                                                 [-0.8 0.2 0.01]]})
 
 (def wa-model {:state "WA", :ld-day 76})
 (def mi-model {:state "MI", :ld-day 83})
